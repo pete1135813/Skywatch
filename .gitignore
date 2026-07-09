@@ -1,0 +1,13 @@
+# Windows Alternate Data Streams
+*:Zone.Identifier
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Arduino / PlatformIO build artifacts
+build/
+.pio/
+.vscode/
+*.elf
+*.bin
+*.map

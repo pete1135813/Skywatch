@@ -1,0 +1,7 @@
+Range=20
+Source=AUTO
+OpenSky=360
+Trails=ON
+Sweep=ON
+Alerts=ON
+Brightness=80
