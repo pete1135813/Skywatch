@@ -1,10 +1,12 @@
 #include "InputCYD.h"
+#include "CydSpi.h"
 
 void InputCYD::begin() {
   lastAutoCycle = millis();
+  refreshRequested = false;
 
 #if ENABLE_TOUCH_NAV
-  touchSPI.begin(TOUCH_CLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
+  cydClaimTouchSpi(touchSPI);
   touch.begin(touchSPI);
   touch.setRotation(1);
 #endif
@@ -39,8 +41,22 @@ void InputCYD::setScreen(ScreenMode newScreen) {
   screen = newScreen;
 }
 
+bool InputCYD::consumeRefreshRequest() {
+  if (!refreshRequested) return false;
+  refreshRequested = false;
+  return true;
+}
+
 #if ENABLE_TOUCH_NAV
+bool InputCYD::hitRefreshButton(int x, int y) {
+  return x >= REFRESH_BTN_X && x < (REFRESH_BTN_X + REFRESH_BTN_W) &&
+         y >= REFRESH_BTN_Y && y < (REFRESH_BTN_Y + REFRESH_BTN_H);
+}
+
 bool InputCYD::readTouch(int &x, int &y) {
+  // Reclaim VSPI for touch pins if SD just used the bus.
+  cydClaimTouchSpi(touchSPI);
+
   if (!touch.touched()) return false;
   if (millis() - lastTouchMs < 250) return false; // debounce
 
@@ -57,6 +73,14 @@ bool InputCYD::readTouch(int &x, int &y) {
 }
 
 void InputCYD::handleTouch(int x, int y) {
+  // Manual traffic refresh — only on radar screen, dedicated hit box.
+  if (screen == SCREEN_RADAR && hitRefreshButton(x, y)) {
+    refreshRequested = true;
+    Serial.println(F("[Touch] RFRSH button"));
+    return;
+  }
+
+  // Bottom nav bar only for screen changes.
   if (y < TOUCH_BAR_Y) return;
 
   int w = SCREEN_WIDTH / 4;

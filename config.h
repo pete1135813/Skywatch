@@ -7,6 +7,8 @@
 
 #include <Arduino.h>
 
+static const char BUILD_LABEL[] = "Build 26 Memory";
+
 // ---------------------- DISPLAY ----------------------
 static const int SCREEN_WIDTH  = 320;
 static const int SCREEN_HEIGHT = 240;
@@ -51,7 +53,7 @@ static const int TOUCH_MAX_Y = 3800;
 #define DATA_SOURCE_OPENSKY  2
 #define DATA_SOURCE_DEMO     3
 
-#define SKYWATCH_DATA_SOURCE DATA_SOURCE_AUTO
+#define SKYWATCH_DATA_SOURCE DATA_SOURCE_OPENSKY
 
 // Local ADS-B receiver endpoints usually look like one of these:
 //   http://192.168.1.xxx/tar1090/data/aircraft.json
@@ -69,9 +71,9 @@ static const uint16_t LOCAL_ADSB_HTTP_TIMEOUT_MS = 250;
 #define OPENSKY_MODE_60_SEC      1
 #define OPENSKY_MODE_360_SEC     2
 
-#define OPENSKY_CALL_MODE OPENSKY_MODE_360_SEC
+#define OPENSKY_CALL_MODE OPENSKY_MODE_60_SEC
 static const unsigned long OPENSKY_60_INTERVAL_MS  = 60000;
-static const unsigned long OPENSKY_360_INTERVAL_MS = 60000;
+static const unsigned long OPENSKY_360_INTERVAL_MS = 360000;
 static const bool ENABLE_DEMO_FALLBACK = true;
 
 // ---------------------- BATTERY ----------------------
@@ -99,11 +101,39 @@ static const unsigned long BATTERY_UPDATE_INTERVAL_MS = 10000;
 static const bool AUTO_CYCLE_SCREENS = false;
 static const unsigned long AUTO_CYCLE_INTERVAL_MS = 8000;
 
+// Manual traffic refresh button — MUST sit outside the radar sprite footprint
+// (sprite is x=0..STATUS_PANEL_X-1). Right-hand status column stays steady.
+static const int REFRESH_BTN_X = 228;
+static const int REFRESH_BTN_Y = 170;
+static const int REFRESH_BTN_W = 86;
+static const int REFRESH_BTN_H = 18;
+
 // ---------------------- SD / STORAGE ----------------------
 #define ENABLE_SD_STORAGE 1
-static const int SD_CS_PIN = 5;
+// CYD microSD on VSPI (shared peripheral with touch — see CydSpi.h)
+static const int SD_CS_PIN   = 5;
+static const int SD_SCK_PIN  = 18;
+static const int SD_MISO_PIN = 19;
+static const int SD_MOSI_PIN = 23;
+// Hold TFT CS high while using SD (typical CYD TFT_CS = GPIO 15).
+static const int TFT_CS_PIN  = 15;
+// 10 MHz is a safe default for CYD microSD after TFT_eSPI has been started.
+static const uint32_t SD_SPI_HZ = 10000000;
 static const char SD_LOGO_PATH[] = "/logos/skywatch_logo.bmp";
+static const char SD_LOGO_PATH_ALT[] = "/skywatch_logo.bmp";
 static const char SD_EVENT_LOG_PATH[] = "/events/events.txt";
+// Splash BMP color fixes (24-bit BMP is BGR on disk; CYD/TFT_eSPI often needs tweaks):
+//   SWAP_BYTES — required for most TFT_eSPI pushImage RGB565 buffers (try this first)
+//   INVERT     — photographic negative look (black<->white); set 0 if only hues were wrong
+//   SWAP_RB    — red/blue channel swap if sky is orange / skin is blue
+#define SPLASH_BMP_SWAP_BYTES 1
+#define SPLASH_BMP_INVERT     0
+#define SPLASH_BMP_SWAP_RB    0
+
+// How often to flush aircraft profiles / daily stats to SD (lighter writes are safer).
+static const unsigned long AIRCRAFT_MEMORY_WRITE_INTERVAL_MS = 120000; // 2 minutes
+// Reappearance after this gap counts as a new "Seen" sighting (not every flush).
+static const unsigned long AIRCRAFT_SEEN_GAP_SEC = 300; // 5 minutes
 
 // Observer / alert behavior
 #define ENABLE_OBSERVER_ALERTS 1
@@ -112,3 +142,16 @@ static const unsigned long OBSERVER_IDLE_MS = 300000;
 
 // ---------------------- WIFI ----------------------
 static const char WIFI_PORTAL_SSID[] = "Skywatch";
+
+// ---------------------- NTP / TIME ----------------------
+// Used for SD profile timestamps and event logs once WiFi is up.
+static const char NTP_SERVER_1[] = "pool.ntp.org";
+static const char NTP_SERVER_2[] = "time.google.com";
+// POSIX TZ string. Examples:
+//   "UTC0"
+//   "PST8PDT,M3.2.0,M11.1.0"   // US Pacific
+//   "EST5EDT,M3.2.0,M11.1.0"   // US Eastern
+//   "CST6CDT,M3.2.0,M11.1.0"   // US Central
+//   "MST7MDT,M3.2.0,M11.1.0"   // US Mountain
+static const char TIMEZONE[] = "UTC0";
+static const unsigned long NTP_SYNC_TIMEOUT_MS = 8000;

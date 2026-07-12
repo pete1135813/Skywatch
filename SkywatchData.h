@@ -47,11 +47,17 @@ struct SkyEvent {
 
 class SkywatchData {
 public:
+  using HeapHook = void (*)();
+
   void begin();
   void fetchHomeLocationFromIP();
   void updatePlanes();
   void updateBattery();
   void forceOpenSkyRefresh();
+  // Immediate traffic pull: bypass OpenSky interval and local ADS-B backoff.
+  void forceTrafficRefresh();
+  // Optional: free large UI buffers around HTTPS (radar sprite ~85KB).
+  void setNetworkHeapHooks(HeapHook beforeNet, HeapHook afterNet);
 
   void setHomeCoords(float lat, float lon, bool overridden = true);
   float getHomeLat() const;
@@ -99,6 +105,8 @@ private:
   unsigned long lastLocalAttemptMs = 0;
   unsigned long lastOpenSkyAttemptMs = 0;
   bool openSkyManualRequest = false;
+  HeapHook beforeNetworkHook = nullptr;
+  HeapHook afterNetworkHook = nullptr;
 
   void clearPlanes();
   int findOldPlaneIndex(const Plane oldPlanes[], int oldCount, const String &icao, const String &callsign) const;
@@ -110,6 +118,7 @@ private:
 
   bool fetchLocalAdsb();
   bool fetchOpenSky();
+  bool applyOpenSkyStates(JsonVariant root);
   void generateDemoTraffic();
   bool openSkyAllowedNow() const;
   unsigned long openSkyIntervalMs() const;

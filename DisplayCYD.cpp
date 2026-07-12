@@ -2,16 +2,43 @@
 #include <math.h>
 #include <WiFi.h>
 #include <SD.h>
+#include "CydSpi.h"
 
 void DisplayCYD::begin() {
   tft.init();
   tft.setRotation(1); // CYD landscape: 320x240
   tft.fillScreen(TFT_BLACK);
   tft.setTextFont(1);
-  radarSprite.setColorDepth(16);
-  radarSpriteReady = radarSprite.createSprite(STATUS_PANEL_X, TOUCH_BAR_Y - 16);
-  if (!radarSpriteReady) Serial.println("[Display] Radar sprite allocation failed; falling back to direct draw.");
+  // Radar sprite is deferred until after splash so SD logo load has max RAM/SPI calm.
+  radarSpriteReady = false;
   fpsWindowStart = millis();
+  Serial.printf("[Display] TFT ready, free heap %u (sprite deferred for splash)\n",
+                ESP.getFreeHeap());
+}
+
+void DisplayCYD::ensureRadarSprite() {
+  if (radarSpriteReady) return;
+  radarSprite.setColorDepth(16);
+  // Height stops above the info strip; width is left of the status column.
+  // RFRSH lives in the status column (x>=224) so the sprite cannot erase it.
+  radarSpriteReady = radarSprite.createSprite(STATUS_PANEL_X, TOUCH_BAR_Y - 16);
+  if (!radarSpriteReady) {
+    Serial.println(F("[Display] Radar sprite allocation failed; falling back to direct draw."));
+  } else {
+    Serial.printf("[Display] Radar sprite OK — free heap %u maxAlloc %u\n",
+                  ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  }
+}
+
+void DisplayCYD::pauseHeavyBuffers() {
+  if (!radarSpriteReady) return;
+  radarSprite.deleteSprite();
+  radarSpriteReady = false;
+  Serial.printf("[Display] Sprite paused — free heap %u\n", ESP.getFreeHeap());
+}
+
+void DisplayCYD::resumeHeavyBuffers() {
+  ensureRadarSprite();
 }
 
 void DisplayCYD::setStorageStatus(bool ready, const String &status) {
@@ -20,9 +47,22 @@ void DisplayCYD::setStorageStatus(bool ready, const String &status) {
 }
 
 bool DisplayCYD::drawBmpFromSD(const char *filename, int16_t x, int16_t y) {
-  if (!sdReady) return false;
-  File bmpFS = SD.open(filename, "r");
-  if (!bmpFS) return false;
+  if (!sdReady) {
+    Serial.println(F("[BMP] skipped — SD not ready"));
+    return false;
+  }
+  cydClaimSdSpi();
+
+  if (!SD.exists(filename)) {
+    Serial.printf("[BMP] missing: %s\n", filename);
+    return false;
+  }
+
+  File bmpFS = SD.open(filename, FILE_READ);
+  if (!bmpFS) {
+    Serial.printf("[BMP] open failed: %s\n", filename);
+    return false;
+  }
 
   auto read16 = [&]() -> uint16_t {
     uint16_t result;
@@ -39,17 +79,35 @@ bool DisplayCYD::drawBmpFromSD(const char *filename, int16_t x, int16_t y) {
     return result;
   };
 
-  if (read16() != 0x4D42) { bmpFS.close(); return false; }
-  (void)read32();
-  (void)read32();
+  uint16_t magic = read16();
+  if (magic != 0x4D42) {
+    Serial.printf("[BMP] bad magic 0x%04X in %s\n", magic, filename);
+    bmpFS.close();
+    return false;
+  }
+  (void)read32(); // file size
+  (void)read32(); // reserved
   uint32_t imageOffset = read32();
-  (void)read32();
+  uint32_t dibSize = read32();
   int32_t bmpWidth = (int32_t)read32();
   int32_t bmpHeight = (int32_t)read32();
-  if (read16() != 1) { bmpFS.close(); return false; }
+  if (read16() != 1) { bmpFS.close(); Serial.println(F("[BMP] bad planes")); return false; }
   uint16_t depth = read16();
-  if (depth != 24) { bmpFS.close(); return false; }
-  if (read32() != 0) { bmpFS.close(); return false; }
+  uint32_t compression = read32();
+
+  // 24-bit uncompressed is required. (Some editors write 32-bit — reject clearly.)
+  if (depth != 24) {
+    Serial.printf("[BMP] need 24-bit, got %u bpp (%s)\n", depth, filename);
+    bmpFS.close();
+    return false;
+  }
+  if (compression != 0) {
+    Serial.printf("[BMP] compressed (%lu) not supported: %s\n",
+                  (unsigned long)compression, filename);
+    bmpFS.close();
+    return false;
+  }
+  (void)dibSize;
 
   bool flip = true;
   if (bmpHeight < 0) { bmpHeight = -bmpHeight; flip = false; }
@@ -62,37 +120,121 @@ bool DisplayCYD::drawBmpFromSD(const char *filename, int16_t x, int16_t y) {
   if ((x + w - 1) >= tft.width())  w = tft.width()  - x;
   if ((y + h - 1) >= tft.height()) h = tft.height() - y;
 
+  Serial.printf("[BMP] drawing %s (%dx%d) offset=%lu  swapBytes=%d invert=%d swapRB=%d\n",
+                filename, (int)bmpWidth, (int)bmpHeight,
+                (unsigned long)imageOffset,
+                SPLASH_BMP_SWAP_BYTES, SPLASH_BMP_INVERT, SPLASH_BMP_SWAP_RB);
+
+  // Make sure any prior TFT SPI transaction is closed before we stream pixels.
+  tft.endWrite();
+
+  // TFT_eSPI: pushImage RGB565 buffers usually need byte-swap for correct colors.
+  const bool prevSwap = tft.getSwapBytes();
+#if SPLASH_BMP_SWAP_BYTES
+  tft.setSwapBytes(true);
+#else
+  tft.setSwapBytes(false);
+#endif
+
   for (int row = 0; row < h; row++) {
     uint32_t pos = imageOffset + (flip ? (bmpHeight - 1 - row) : row) * rowSize;
-    bmpFS.seek(pos);
+    if (!bmpFS.seek(pos)) {
+      Serial.printf("[BMP] seek failed at row %d\n", row);
+      tft.setSwapBytes(prevSwap);
+      bmpFS.close();
+      return false;
+    }
     int col = 0;
     while (col < w) {
       int chunk = min(40, w - col);
-      bmpFS.read(sdbuffer, chunk * 3);
+      size_t got = bmpFS.read(sdbuffer, chunk * 3);
+      if (got < (size_t)(chunk * 3)) {
+        Serial.println(F("[BMP] short read"));
+        tft.setSwapBytes(prevSwap);
+        bmpFS.close();
+        return false;
+      }
       for (int i = 0; i < chunk; i++) {
+        // Standard Windows BMP 24-bit pixel order is B,G,R.
         uint8_t b = sdbuffer[i * 3 + 0];
         uint8_t g = sdbuffer[i * 3 + 1];
         uint8_t r = sdbuffer[i * 3 + 2];
+#if SPLASH_BMP_SWAP_RB
+        uint8_t tmp = r; r = b; b = tmp;
+#endif
+#if SPLASH_BMP_INVERT
+        // Photographic negative — each channel flipped.
+        r = (uint8_t)(255 - r);
+        g = (uint8_t)(255 - g);
+        b = (uint8_t)(255 - b);
+#endif
         linebuffer[i] = tft.color565(r, g, b);
       }
       tft.pushImage(x + col, y + row, chunk, 1, linebuffer);
       col += chunk;
     }
+    // Keep the watchdog happy on large 320x240 logos.
+    if ((row & 15) == 0) yield();
   }
+
+  tft.setSwapBytes(prevSwap);
   bmpFS.close();
+  Serial.println(F("[BMP] splash logo OK"));
   return true;
+}
+
+bool DisplayCYD::tryDrawSplashLogo() {
+  if (!sdReady) {
+    Serial.println(F("[BMP] SD not ready — cannot load logo"));
+    return false;
+  }
+  cydClaimSdSpi();
+
+  // List /logos so a wrong filename on the card is obvious in Serial.
+  Serial.println(F("[BMP] Listing /logos ..."));
+  File dir = SD.open("/logos");
+  if (!dir) {
+    Serial.println(F("[BMP] /logos open failed (folder missing?)"));
+  } else if (!dir.isDirectory()) {
+    Serial.println(F("[BMP] /logos is not a directory"));
+    dir.close();
+  } else {
+    int n = 0;
+    for (;;) {
+      File ent = dir.openNextFile();
+      if (!ent) break;
+      Serial.printf("[BMP]   %s  (%u bytes)\n", ent.name(), (unsigned)ent.size());
+      ent.close();
+      n++;
+      if (n > 20) break;
+    }
+    dir.close();
+    if (n == 0) Serial.println(F("[BMP]   (empty folder)"));
+  }
+
+  // Prefer the documented path, then a root fallback.
+  if (drawBmpFromSD(SD_LOGO_PATH, 0, 0)) { logoLoadedOk = true; return true; }
+  if (drawBmpFromSD(SD_LOGO_PATH_ALT, 0, 0)) { logoLoadedOk = true; return true; }
+  // Common 8.3 / case variants on FAT cards formatted by Windows.
+  if (drawBmpFromSD("/logos/SKYWATCH.BMP", 0, 0)) { logoLoadedOk = true; return true; }
+  if (drawBmpFromSD("/LOGOS/SKYWATCH.BMP", 0, 0)) { logoLoadedOk = true; return true; }
+  logoLoadedOk = false;
+  return false;
 }
 
 void DisplayCYD::showSplash() {
   tft.fillScreen(TFT_BLACK);
+  Serial.println(F("[BMP] Splash — attempting SD logo..."));
+  Serial.printf("[BMP] sdReady=%d heap=%u\n", sdReady ? 1 : 0, ESP.getFreeHeap());
 
-  // If /logos/skywatch_logo.bmp exists on the SD card, use it as the real splash screen.
+  // If a 24-bit BMP logo is on the SD card, use it as the splash screen.
   // Otherwise draw a lightweight vector fallback so the firmware still boots cleanly.
-  if (drawBmpFromSD(SD_LOGO_PATH, 0, 0)) {
-    delay(1200);
+  if (tryDrawSplashLogo()) {
+    delay(1500);
     return;
   }
 
+  Serial.println(F("[BMP] Logo failed — vector splash fallback"));
   // Vector fallback splash screen.
   int cx = CENTER_X;
   int cy = CENTER_Y - 12;
@@ -120,7 +262,7 @@ void DisplayCYD::showSystemCheck(const SkywatchData &data) {
 
   tft.drawString("SKYWATCH MK IV", 8, 10);
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  tft.drawString("Build 25 Observer", 214, 10);
+  tft.drawString(BUILD_LABEL, 200, 10);
   tft.drawLine(8, 25, 312, 25, TFT_DARKGREY);
 
   struct Row { const char *name; String value; uint16_t color; };
@@ -197,16 +339,53 @@ void DisplayCYD::updateFps() {
   }
 }
 
-void DisplayCYD::drawScreen(ScreenMode screen, const SkywatchData &data) {
-  updateFps();
+void DisplayCYD::paintScreen(ScreenMode screen, const SkywatchData &data, bool forceChrome) {
   switch (screen) {
     case SCREEN_LIST:    drawAircraftList(data); break;
     case SCREEN_TRAFFIC: drawTrafficPage(data); break;
     case SCREEN_SYSTEM:  drawSystemPage(data); break;
     case SCREEN_RADAR:
-    default:             drawRadar(data); break;
+    default:             drawRadar(data, forceChrome); break;
   }
-  if (data.hasRecentAlert(ALERT_POPUP_MS)) drawAlertBanner(data);
+}
+
+void DisplayCYD::drawScreen(ScreenMode screen, const SkywatchData &data) {
+  updateFps();
+
+  const bool screenChanged = (screen != lastScreen);
+  if (screenChanged) {
+    lastScreen = screen;
+    menuDrawnForScreen = false;
+    lastChromeMs = 0; // force chrome on new page
+  }
+
+#if ENABLE_OBSERVER_ALERTS
+  const bool alertNow = data.hasRecentAlert(ALERT_POPUP_MS);
+  if (alertNow) {
+    const SkyEvent &e = data.getLatestEvent();
+    String key = e.type + "|" + e.callsign + "|" + String(e.createdMs);
+    // Freeze the underlay while an alert is up — stops radar/status FPS flash through the popup.
+    if (!alertFrozen || key != alertFreezeKey) {
+      paintScreen(screen, data, true);
+      drawAlertBanner(data);
+      alertFrozen = true;
+      alertFreezeKey = key;
+    }
+    return;
+  }
+
+  if (alertFrozen) {
+    // Alert just expired — force one full clean redraw underneath.
+    alertFrozen = false;
+    alertFreezeKey = "";
+    lastChromeMs = 0;
+    menuDrawnForScreen = false;
+    paintScreen(screen, data, true);
+    return;
+  }
+#endif
+
+  paintScreen(screen, data, screenChanged);
 }
 
 void DisplayCYD::drawTopBar(const char *title, const SkywatchData &data) {
@@ -258,9 +437,21 @@ void DisplayCYD::drawTouchMenu(ScreenMode activeScreen) {
   drawMenuButton(3, "SYSTEM",  activeScreen == SCREEN_SYSTEM);
 }
 
-void DisplayCYD::drawRadar(const SkywatchData &data) {
-  // Build the constantly-changing radar area off-screen, then push it in one shot.
-  // This removes the full-screen black flash that caused the flicker.
+void DisplayCYD::drawRadarChrome(const SkywatchData &data) {
+  drawBatteryIndicator(data.getBatteryPercent());
+  drawLiveStatusPanel(data);
+  drawInfoStrip(data);
+  bool pending = data.getLastApiStatus().startsWith("Manual refresh");
+  drawRefreshButton(pending);
+  lastRefreshPending = pending;
+  drawTouchMenu(SCREEN_RADAR);
+  menuDrawnForScreen = true;
+  lastChromeMs = millis();
+}
+
+void DisplayCYD::drawRadar(const SkywatchData &data, bool forceChrome) {
+  // Animated radar scope only — pushed as one sprite so the scope itself does not tear.
+  // Sprite covers x=0..STATUS_PANEL_X only. RFRSH + LIVE panel are to the right of that.
   if (radarSpriteReady) {
     renderRadarSprite(data);
   } else {
@@ -275,11 +466,34 @@ void DisplayCYD::drawRadar(const SkywatchData &data) {
     for (int i = 0; i < data.getPlaneCount(); i++) drawPlaneTarget(data.getPlane(i), i);
   }
 
-  // Static/right-side regions are redrawn separately so the whole screen does not blink.
-  drawBatteryIndicator(data.getBatteryPercent());
-  drawLiveStatusPanel(data);
-  drawInfoStrip(data);
-  drawTouchMenu(SCREEN_RADAR);
+  // Status / RFRSH / menu are NOT redrawn at radar FPS — keeps the right column steady.
+  // RFRSH is outside the sprite, so once drawn it is not erased by the sweep.
+  const bool pending = data.getLastApiStatus().startsWith("Manual refresh");
+  const bool pendingChanged = (pending != lastRefreshPending);
+  const bool chromeDue = forceChrome || !menuDrawnForScreen ||
+                         pendingChanged ||
+                         (millis() - lastChromeMs >= PAGE_REDRAW_INTERVAL_MS);
+  if (chromeDue) {
+    drawRadarChrome(data);
+  }
+}
+
+void DisplayCYD::drawRefreshButton(bool active) {
+  const int x = REFRESH_BTN_X;
+  const int y = REFRESH_BTN_Y;
+  const int w = REFRESH_BTN_W;
+  const int h = REFRESH_BTN_H;
+
+  uint16_t fill    = active ? TFT_YELLOW : TFT_BLACK;
+  uint16_t outline = active ? TFT_YELLOW : TFT_CYAN;
+  uint16_t text    = active ? TFT_BLACK : TFT_CYAN;
+
+  tft.fillRoundRect(x, y, w, h, 3, fill);
+  tft.drawRoundRect(x, y, w, h, 3, outline);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(text, fill);
+  tft.drawString(active ? "...." : "RFRSH", x + w / 2, y + h / 2);
 }
 
 void DisplayCYD::renderRadarSprite(const SkywatchData &data) {
@@ -392,7 +606,8 @@ void DisplayCYD::drawLiveStatusPanel(const SkywatchData &data) {
   int x = STATUS_PANEL_X;
   int y = 27;
   int w = SCREEN_WIDTH - STATUS_PANEL_X - 5;
-  int h = TOUCH_BAR_Y - 48;
+  // Leave room under the panel for the RFRSH button (same column, outside sprite).
+  int h = REFRESH_BTN_Y - y - 4;
 
   tft.fillRect(x - 2, y - 2, w + 4, h + 4, TFT_BLACK);
   tft.drawRoundRect(x, y, w, h, 4, TFT_DARKGREEN);
@@ -652,6 +867,7 @@ void DisplayCYD::drawAlertBanner(const SkywatchData &data) {
 }
 
 void DisplayCYD::drawAircraftList(const SkywatchData &data) {
+  // Leave the bottom touch bar alone unless this is the first paint on this page.
   tft.fillRect(0, 0, SCREEN_WIDTH, TOUCH_BAR_Y, TFT_BLACK);
   drawTopBar("AIRCRAFT LIST", data);
 
@@ -695,7 +911,10 @@ void DisplayCYD::drawAircraftList(const SkywatchData &data) {
   }
 
   drawInfoStrip(data);
-  drawTouchMenu(SCREEN_LIST);
+  if (!menuDrawnForScreen) {
+    drawTouchMenu(SCREEN_LIST);
+    menuDrawnForScreen = true;
+  }
 }
 
 void DisplayCYD::drawTrafficPage(const SkywatchData &data) {
@@ -722,7 +941,10 @@ void DisplayCYD::drawTrafficPage(const SkywatchData &data) {
     tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
     tft.drawString("No traffic in range", 94, 100);
     drawInfoStrip(data);
-    drawTouchMenu(SCREEN_TRAFFIC);
+    if (!menuDrawnForScreen) {
+      drawTouchMenu(SCREEN_TRAFFIC);
+      menuDrawnForScreen = true;
+    }
     return;
   }
 
@@ -783,7 +1005,10 @@ void DisplayCYD::drawTrafficPage(const SkywatchData &data) {
   }
 
   drawInfoStrip(data);
-  drawTouchMenu(SCREEN_TRAFFIC);
+  if (!menuDrawnForScreen) {
+    drawTouchMenu(SCREEN_TRAFFIC);
+    menuDrawnForScreen = true;
+  }
 }
 
 void DisplayCYD::drawSystemPage(const SkywatchData &data) {
@@ -805,7 +1030,7 @@ void DisplayCYD::drawSystemPage(const SkywatchData &data) {
   tft.drawString("FPS: " + String(fps) + "  RAM: " + String((int)(ESP.getFreeHeap() / 1024)) + "k", 168, 113);
   tft.drawString("Trails: " + String(ENABLE_MOTION_TRAILS ? "enabled" : "off") + "  points " + String(TRAIL_POINTS), 8, 130);
   tft.drawString("Sweep: " + String(ENABLE_RADAR_SWEEP ? "enabled" : "off"), 168, 130);
-  tft.drawString("CPA + Alerts: enabled   Build 25 Observer", 8, 195);
+  tft.drawString(String("CPA + Alerts: enabled   ") + BUILD_LABEL, 8, 195);
   tft.drawString("Home lat: " + String(data.getHomeLat(), 6), 8, 147);
   tft.drawString("Home lon: " + String(data.getHomeLon(), 6), 8, 164);
   tft.drawString("Coords: " + String(data.coordsWereOverridden() ? "manual/web" : "IP lookup"), 168, 147);
@@ -816,5 +1041,8 @@ void DisplayCYD::drawSystemPage(const SkywatchData &data) {
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
   // Footer intentionally reserved for touch menu / future settings hint
 
-  drawTouchMenu(SCREEN_SYSTEM);
+  if (!menuDrawnForScreen) {
+    drawTouchMenu(SCREEN_SYSTEM);
+    menuDrawnForScreen = true;
+  }
 }

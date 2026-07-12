@@ -213,6 +213,18 @@ void SkywatchData::forceOpenSkyRefresh() {
   openSkyManualRequest = true;
 }
 
+void SkywatchData::forceTrafficRefresh() {
+  openSkyManualRequest = true;
+  lastLocalAttemptMs = 0; // allow immediate local ADS-B probe in AUTO mode
+  lastApiStatus = "Manual refresh...";
+  Serial.println(F("[Traffic] Manual refresh requested"));
+}
+
+void SkywatchData::setNetworkHeapHooks(HeapHook beforeNet, HeapHook afterNet) {
+  beforeNetworkHook = beforeNet;
+  afterNetworkHook = afterNet;
+}
+
 unsigned long SkywatchData::openSkyIntervalMs() const {
 #if OPENSKY_CALL_MODE == OPENSKY_MODE_60_SEC
   return OPENSKY_60_INTERVAL_MS;
@@ -367,55 +379,132 @@ bool SkywatchData::fetchOpenSky() {
     return false;
   }
 
-  Serial.println("[OpenSky] Fetching planes...");
   float dLat = MAX_RANGE_NM / 60.0f;
   float cosLat = cos(homeLat * PI / 180.0f);
   if (fabs(cosLat) < 0.001f) cosLat = 0.001f;
   float dLon = MAX_RANGE_NM / (60.0f * cosLat);
 
-  String url = "https://opensky-network.org/api/states/all?lamin=" +
+  // Host + path form gives WiFiClientSecure a reliable SNI target.
+  const char *host = "opensky-network.org";
+  String uri = String("/api/states/all?lamin=") +
                String(homeLat - dLat, 6) + "&lomin=" + String(homeLon - dLon, 6) +
                "&lamax=" + String(homeLat + dLat, 6) + "&lomax=" + String(homeLon + dLon, 6);
-  Serial.println(url);
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setTimeout(12000);
-  http.useHTTP10(true);
-  if (!http.begin(client, url)) {
-    lastApiStatus = "OpenSky begin failed";
-    lastHttpCode = 0;
+  Serial.println(F("[OpenSky] Fetching planes..."));
+  Serial.printf("[OpenSky] https://%s%s\n", host, uri.c_str());
+  Serial.printf("[OpenSky] heap free=%u maxAlloc=%u\n",
+                ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+
+  // Drop large UI allocations for the TLS handshake (radar sprite is ~85KB).
+  if (beforeNetworkHook) beforeNetworkHook();
+
+  IPAddress resolved;
+  if (WiFi.hostByName(host, resolved)) {
+    Serial.print(F("[OpenSky] DNS OK: "));
+    Serial.println(resolved);
+  } else {
+    Serial.println(F("[OpenSky] DNS failed for opensky-network.org"));
+    lastApiStatus = "OpenSky DNS fail";
+    lastHttpCode = -1;
+    if (afterNetworkHook) afterNetworkHook();
     return false;
   }
-  http.addHeader("Accept", "application/json");
-  http.addHeader("User-Agent", "Skywatch-CYD/2.4");
-  int code = http.GET();
-  lastHttpCode = code;
-  String payload = http.getString();
-  http.end();
-  payload.trim();
 
-  Serial.print("[OpenSky] HTTP code: "); Serial.println(code);
-  if (code != 200) {
+  int code = -1;
+  String payload;
+
+  // Two attempts for flaky TLS. Do NOT retry 429 — that burns the rate limit further.
+  for (int attempt = 1; attempt <= 2; attempt++) {
+    WiFiClientSecure client;
+    client.setInsecure();              // no CA bundle on device
+    client.setHandshakeTimeout(45);    // seconds
+    client.setTimeout(20);             // seconds (socket)
+
+    HTTPClient http;
+    http.setConnectTimeout(15000);     // ms
+    http.setTimeout(20000);            // ms
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.setReuse(false);
+    http.useHTTP10(true);
+
+    // begin(client, host, port, uri, https)
+    if (!http.begin(client, host, 443, uri, true)) {
+      Serial.printf("[OpenSky] begin() failed (attempt %d)\n", attempt);
+      lastApiStatus = "OpenSky begin failed";
+      lastHttpCode = 0;
+      http.end();
+      delay(400);
+      continue;
+    }
+
+    http.addHeader("Accept", "application/json");
+    http.addHeader("User-Agent", "Skywatch-CYD/2.6");
+    http.addHeader("Connection", "close");
+
+    code = http.GET();
+    lastHttpCode = code;
+    Serial.printf("[OpenSky] HTTP code: %d (attempt %d) %s\n",
+                  code, attempt,
+                  (code < 0) ? http.errorToString(code).c_str() : "ok");
+
+    if (code == 200) {
+      // Prefer stream read to avoid holding two large copies of the body.
+      payload = http.getString();
+      http.end();
+      break;
+    }
+
+    // Keep a readable status for the UI.
     if (code == 429) lastApiStatus = "Rate limited 429";
     else if (code == 403) lastApiStatus = "Forbidden 403";
+    else if (code < 0) lastApiStatus = String("TLS/conn ") + http.errorToString(code);
     else lastApiStatus = "OpenSky HTTP " + String(code);
-    return false;
+
+    http.end();
+
+    // Rate limit / hard HTTP errors: one answer is enough.
+    if (code == 429 || code == 403 || code == 401) break;
+    delay(600);
   }
-  if (payload.length() == 0 || payload[0] != '{') {
-    lastApiStatus = "OpenSky non-JSON";
+
+  if (code != 200) {
+    if (afterNetworkHook) afterNetworkHook();
     return false;
   }
 
-  DynamicJsonDocument doc(65536);
-  DeserializationError err = deserializeJson(doc, payload);
-  if (err) {
-    lastApiStatus = String("OpenSky JSON ") + err.f_str();
+  payload.trim();
+  if (payload.length() == 0 || payload[0] != '{') {
+    lastApiStatus = "OpenSky non-JSON";
+    if (afterNetworkHook) afterNetworkHook();
     return false;
   }
-  JsonArray states = doc["states"].as<JsonArray>();
+
+  // Local 20nm boxes are small (often <2KB). 16KB is plenty and leaves RAM for UI.
+  bool ok = false;
+  {
+    DynamicJsonDocument doc(16384);
+    DeserializationError err = deserializeJson(doc, payload);
+    if (!err) {
+      ok = applyOpenSkyStates(doc.as<JsonVariant>());
+    } else {
+      // One more try with a larger doc if the box was unusually busy.
+      DynamicJsonDocument docBig(32768);
+      err = deserializeJson(docBig, payload);
+      if (err) {
+        lastApiStatus = String("OpenSky JSON ") + err.f_str();
+        ok = false;
+      } else {
+        ok = applyOpenSkyStates(docBig.as<JsonVariant>());
+      }
+    }
+  }
+
+  if (afterNetworkHook) afterNetworkHook();
+  return ok;
+}
+
+bool SkywatchData::applyOpenSkyStates(JsonVariant root) {
+  JsonArray states = root["states"].as<JsonArray>();
   if (states.isNull()) {
     lastApiStatus = "OpenSky no states";
     return false;
@@ -438,8 +527,10 @@ bool SkywatchData::fetchOpenSky() {
     if (distNm > MAX_RANGE_NM) continue;
 
     Plane &dst = planes[planeCount];
-    dst.icao = String((const char*)(s[0] | "")); dst.icao.trim();
-    dst.callsign = String((const char*)(s[1] | "")); dst.callsign.trim();
+    dst.icao = String((const char *)(s[0] | ""));
+    dst.icao.trim();
+    dst.callsign = String((const char *)(s[1] | ""));
+    dst.callsign.trim();
     dst.distanceNm = distNm;
     dst.bearingDeg = bearingDeg;
     dst.altitudeFt = (float)(s[7] | 0.0) * 3.28084f;

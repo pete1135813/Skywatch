@@ -1,7 +1,10 @@
 Range=20
 Source=AUTO
-OpenSky=360
+OpenSky=60
 Trails=ON
 Sweep=ON
 Alerts=ON
 Brightness=80
+
+Build=26
+Memory=ON
