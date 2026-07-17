@@ -1,0 +1,4 @@
+TFT_eSPI@2.5.43
+WiFiManager@2.0.17
+XPT2046_Touchscreen@1.4
+ArduinoJson@7.4.3

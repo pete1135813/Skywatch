@@ -1,0 +1,192 @@
+name: SkyWatch Firmware CI
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - "**.ino"
+      - "**.h"
+      - "**.hpp"
+      - "**.c"
+      - "**.cpp"
+      - "ci/**"
+      - ".github/workflows/firmware-ci.yml"
+  pull_request:
+    paths:
+      - "**.ino"
+      - "**.h"
+      - "**.hpp"
+      - "**.c"
+      - "**.cpp"
+      - "ci/**"
+      - ".github/workflows/firmware-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skywatch-firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ESP32_CORE_VERSION: "3.3.10"
+  FQBN: "esp32:esp32:esp32:PartitionScheme=huge_app,FlashSize=4M"
+  SKETCH_NAME: "Skywatch_CYD_build26_memory"
+  BUILD_DIR: "${{ github.workspace }}/build/skywatch"
+
+jobs:
+  validate-and-build:
+    name: Validate and build CYD firmware
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Verify required Build 26 files
+        shell: bash
+        run: |
+          required_files=(
+            "Skywatch_CYD_build26_memory.ino"
+            "config.h"
+            "CydSpi.h"
+            "SkywatchData.h"
+            "SkywatchData.cpp"
+            "DisplayCYD.h"
+            "DisplayCYD.cpp"
+            "InputCYD.h"
+            "InputCYD.cpp"
+            "WebDashboard.h"
+            "WebDashboard.cpp"
+            "SkywatchStorage.h"
+            "SkywatchStorage.cpp"
+            "ci/TFT_eSPI_User_Setup.h"
+            "ci/library-versions.txt"
+          )
+
+          for file in "${required_files[@]}"; do
+            if [[ ! -f "${file}" ]]; then
+              echo "::error file=${file}::Required Build 26 file is missing"
+              exit 1
+            fi
+          done
+
+      - name: Check for obvious committed credentials
+        shell: bash
+        run: |
+          if git grep -nEi             '(password|passwd|api[_-]?key|access[_-]?token)[[:space:]]*=[[:space:]]*"[^"]+"'             -- '*.ino' '*.h' '*.hpp' '*.c' '*.cpp'; then
+            echo "::error::Possible hard-coded credential detected"
+            exit 1
+          fi
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Cache Arduino packages and libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+          key: arduino-${{ runner.os }}-esp32-${{ env.ESP32_CORE_VERSION }}-${{ hashFiles('ci/library-versions.txt', 'ci/TFT_eSPI_User_Setup.h') }}
+          restore-keys: |
+            arduino-${{ runner.os }}-esp32-${{ env.ESP32_CORE_VERSION }}-
+
+      - name: Install ESP32 platform
+        shell: bash
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls             https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install "esp32:esp32@${ESP32_CORE_VERSION}"
+
+      - name: Install pinned libraries
+        shell: bash
+        run: |
+          while IFS= read -r library || [[ -n "${library}" ]]; do
+            [[ -z "${library}" || "${library}" == \#* ]] && continue
+            arduino-cli lib install "${library}"
+          done < ci/library-versions.txt
+
+      - name: Install tested CYD display configuration
+        shell: bash
+        run: |
+          tft_setup="${HOME}/Arduino/libraries/TFT_eSPI/User_Setup.h"
+          test -f "${tft_setup}"
+          cp ci/TFT_eSPI_User_Setup.h "${tft_setup}"
+
+          expected="2d3f1af653b88c1f9d6f59a3cbceaa907bf9a850ef3719dc93dbe5e3f47a82e8"
+          actual="$(sha256sum "${tft_setup}" | cut -d ' ' -f 1)"
+          test "${actual}" = "${expected}"
+
+      - name: Stage Arduino sketch
+        shell: bash
+        run: |
+          staged="${RUNNER_TEMP}/${SKETCH_NAME}"
+          mkdir -p "${staged}"
+
+          find . -maxdepth 1 -type f \
+            \( -name '*.ino' -o -name '*.h' -o -name '*.hpp' -o                -name '*.c' -o -name '*.cpp' \)             -exec cp {} "${staged}/" \;
+
+          test -f "${staged}/${SKETCH_NAME}.ino"
+          echo "STAGED_SKETCH=${staged}" >> "${GITHUB_ENV}"
+
+      - name: Compile firmware
+        shell: bash
+        run: |
+          mkdir -p "${BUILD_DIR}"
+
+          set -o pipefail
+          arduino-cli compile             --fqbn "${FQBN}"             --warnings all             --export-binaries             --output-dir "${BUILD_DIR}"             "${STAGED_SKETCH}"             2>&1 | tee "${BUILD_DIR}/compile.log"
+
+      - name: Verify firmware output
+        shell: bash
+        run: |
+          test -n "$(find "${BUILD_DIR}" -maxdepth 1 -name '*.bin' -print -quit)"
+          test -n "$(find "${BUILD_DIR}" -maxdepth 1 -name '*.elf' -print -quit)"
+
+      - name: Write build information
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "${BUILD_DIR}"
+          {
+            echo "SkyWatch Build 26 firmware"
+            echo "Commit: ${GITHUB_SHA}"
+            echo "Ref: ${GITHUB_REF}"
+            echo "Board: ${FQBN}"
+            echo "ESP32 core: ${ESP32_CORE_VERSION}"
+            echo "TFT_eSPI setup SHA-256: 2d3f1af653b88c1f9d6f59a3cbceaa907bf9a850ef3719dc93dbe5e3f47a82e8"
+            echo
+            echo "Generated files:"
+            find "${BUILD_DIR}" -maxdepth 1 -type f               -printf '%f %s bytes\n' 2>/dev/null | sort
+          } > "${BUILD_DIR}/build-info.txt"
+
+      - name: Upload firmware artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: skywatch-build26-${{ github.sha }}
+          path: |
+            build/skywatch/*.bin
+            build/skywatch/*.elf
+            build/skywatch/*.map
+            build/skywatch/compile.log
+            build/skywatch/build-info.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload failed build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: skywatch-build26-failure-${{ github.sha }}
+          path: |
+            build/skywatch/compile.log
+            build/skywatch/build-info.txt
+          if-no-files-found: ignore
+          retention-days: 14
