@@ -119,6 +119,7 @@ private:
   bool fetchLocalAdsb();
   bool fetchOpenSky();
   bool applyOpenSkyStates(JsonVariant root);
+  bool tryParseGeoPayload(const String &payload, float &lat, float &lon);
   void generateDemoTraffic();
   bool openSkyAllowedNow() const;
   unsigned long openSkyIntervalMs() const;

@@ -17,13 +17,14 @@ Skywatch shows nearby aircraft on a 320×240 landscape TFT, with touch navigatio
   - Local ADS-B (tar1090 / dump1090) — optional
   - OpenSky Network (HTTPS, rate-limit aware)
   - Demo traffic fallback
+- **IP geolocation** for home lat/lon after WiFi (with retry + fallback provider); manual override via web `/coords`
 - **Observer alerts:** NEW_TARGET / APPROACHING / THREAT_UP popup overlays (stable underlay while shown)
 - **SD card:** boot self-test, folder layout, splash logo, event log, aircraft profiles, daily stats
 - **NTP** wall-clock timestamps for SD logs (configurable timezone)
 - **WiFiManager** captive portal (`Skywatch` AP)
 - **Web dashboard:** `/`, `/planes`, `/coords`
 - **SPI bus ownership** (`CydSpi.h`) so SD + touch share VSPI safely
-- **Heap-safe OpenSky:** radar sprite paused during TLS so HTTPS works on CYD RAM limits
+- **Heap-safe networking:** radar sprite paused during OpenSky TLS and IP geo HTTP
 
 ---
 
@@ -89,7 +90,7 @@ If the logo is missing or invalid, a vector splash is used instead.
 ├── Skywatch_CYD_build26_memory.ino
 ├── config.h
 ├── CydSpi.h                 # SD / touch VSPI ownership
-├── SkywatchData.*           # traffic sources, alerts, OpenSky
+├── SkywatchData.*           # traffic sources, alerts, OpenSky, IP geo
 ├── DisplayCYD.*             # TFT UI, radar sprite, splash BMP
 ├── InputCYD.*               # touch + RFRSH hit testing
 ├── WebDashboard.*
@@ -105,9 +106,11 @@ If the logo is missing or invalid, a vector splash is used instead.
 - Aircraft profiles: `/planes/<ID>.txt` (sighting count uses a gap threshold, not every flush)
 - Daily snapshot: `/stats/today.txt`
 - OpenSky uses **HTTPS** + temporary radar-sprite release for TLS heap
+- IP geo uses heap-safe HTTP, retries, and ipwho.is fallback if ip-api fails
 - Rate-limit **429** is not double-retried
 - Alert popups freeze the underlay (no FPS flash-through)
 - Radar chrome (status / RFRSH / menu) updates ~1 Hz; scope still animates
+- Splash logo: `SPLASH_BMP_SWAP_BYTES 1` for correct CYD colors
 
 ---
 

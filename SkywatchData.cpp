@@ -189,24 +189,137 @@ void SkywatchData::updateBattery() {
   batteryPercent = pct * 100.0f;
 }
 
-void SkywatchData::fetchHomeLocationFromIP() {
-  Serial.println("[Geo] Fetching approximate location from IP...");
-  if (WiFi.status() != WL_CONNECTED) return;
-  HTTPClient http;
-  if (!http.begin("http://ip-api.com/json/?fields=status,message,lat,lon")) return;
-  http.addHeader("Accept", "application/json");
-  http.addHeader("User-Agent", "Skywatch-CYD/2.4");
-  int code = http.GET();
-  if (code != 200) { http.end(); return; }
-  DynamicJsonDocument doc(2048);
-  DeserializationError err = deserializeJson(doc, http.getStream());
-  http.end();
-  if (err) return;
-  if (String(doc["status"] | "fail") == "success") {
-    homeLat = doc["lat"] | 0.0;
-    homeLon = doc["lon"] | 0.0;
-    Serial.printf("[Geo] Location from IP: lat=%.6f lon=%.6f\n", homeLat, homeLon);
+bool SkywatchData::tryParseGeoPayload(const String &payload, float &lat, float &lon) {
+  DynamicJsonDocument doc(1536);
+  DeserializationError err = deserializeJson(doc, payload);
+  if (err) {
+    Serial.printf("[Geo] JSON error: %s\n", err.c_str());
+    return false;
   }
+
+  // ip-api.com: { "status":"success", "lat":.., "lon":.. }
+  const char *status = doc["status"] | "";
+  if (status[0] && strcmp(status, "success") == 0) {
+    lat = doc["lat"].as<float>();
+    lon = doc["lon"].as<float>();
+    return true;
+  }
+
+  // ipwho.is: { "success":true, "latitude":.., "longitude":.. }
+  if (doc["success"] | false) {
+    if (doc.containsKey("latitude")) {
+      lat = doc["latitude"].as<float>();
+      lon = doc["longitude"].as<float>();
+      return true;
+    }
+  }
+
+  // ipapi.co: { "latitude":.., "longitude":.. } or error field
+  if (!doc["error"] && doc.containsKey("latitude") && doc.containsKey("longitude")) {
+    lat = doc["latitude"].as<float>();
+    lon = doc["longitude"].as<float>();
+    return true;
+  }
+
+  Serial.printf("[Geo] Unrecognized payload: %s\n",
+                payload.substring(0, min((unsigned)payload.length(), 120u)).c_str());
+  return false;
+}
+
+void SkywatchData::fetchHomeLocationFromIP() {
+  Serial.println(F("[Geo] Fetching approximate location from IP..."));
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println(F("[Geo] WiFi not connected"));
+    return;
+  }
+
+  // Free radar sprite during the request — same heap pressure that broke OpenSky TLS
+  // can also make plain HTTPClient fail or return empty bodies on CYD.
+  if (beforeNetworkHook) beforeNetworkHook();
+
+  // Free HTTP JSON geo endpoints (no API key). First is the original Skywatch source.
+  const char *urls[] = {
+    "http://ip-api.com/json/?fields=status,message,lat,lon",
+    "http://ipwho.is/",
+  };
+
+  bool ok = false;
+  float lat = 0.0f;
+  float lon = 0.0f;
+
+  for (size_t u = 0; u < sizeof(urls) / sizeof(urls[0]) && !ok; u++) {
+    for (int attempt = 1; attempt <= 2 && !ok; attempt++) {
+      Serial.printf("[Geo] GET %s (attempt %d) heap=%u\n",
+                    urls[u], attempt, ESP.getFreeHeap());
+
+      HTTPClient http;
+      http.setConnectTimeout(12000);
+      http.setTimeout(12000);
+      http.setReuse(false);
+      http.useHTTP10(true);
+
+      if (!http.begin(urls[u])) {
+        Serial.println(F("[Geo] begin() failed"));
+        delay(250);
+        continue;
+      }
+
+      http.addHeader("Accept", "application/json");
+      http.addHeader("User-Agent", "Skywatch-CYD/2.6");
+      http.addHeader("Connection", "close");
+
+      int code = http.GET();
+      Serial.printf("[Geo] HTTP %d %s\n", code,
+                    (code < 0) ? http.errorToString(code).c_str() : "ok");
+
+      if (code != 200) {
+        http.end();
+        delay(400);
+        continue;
+      }
+
+      // getString() is more reliable than streaming into ArduinoJson on ESP32.
+      String payload = http.getString();
+      http.end();
+      payload.trim();
+      if (payload.length() == 0) {
+        Serial.println(F("[Geo] empty body"));
+        delay(400);
+        continue;
+      }
+
+      float pLat = 0.0f, pLon = 0.0f;
+      if (!tryParseGeoPayload(payload, pLat, pLon)) {
+        delay(400);
+        continue;
+      }
+
+      // Reject null-island / parse defaults.
+      if (fabsf(pLat) < 0.0001f && fabsf(pLon) < 0.0001f) {
+        Serial.println(F("[Geo] got 0,0 — ignoring"));
+        continue;
+      }
+      if (pLat < -90.0f || pLat > 90.0f || pLon < -180.0f || pLon > 180.0f) {
+        Serial.printf("[Geo] out of range lat=%.4f lon=%.4f\n", pLat, pLon);
+        continue;
+      }
+
+      lat = pLat;
+      lon = pLon;
+      ok = true;
+    }
+  }
+
+  if (ok) {
+    homeLat = lat;
+    homeLon = lon;
+    // Keep coordsOverridden false so this still counts as IP lookup on SYSTEM page.
+    Serial.printf("[Geo] Location from IP: lat=%.6f lon=%.6f\n", homeLat, homeLon);
+  } else {
+    Serial.println(F("[Geo] FAILED — home stays 0,0 until set on web dashboard /coords"));
+  }
+
+  if (afterNetworkHook) afterNetworkHook();
 }
 
 void SkywatchData::forceOpenSkyRefresh() {

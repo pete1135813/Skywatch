@@ -143,12 +143,27 @@ void setup() {
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 
+  // Brief settle so DNS/DHCP are ready before NTP + geo HTTP.
+  delay(500);
+
   ntpSynced = syncNtpTime();
 
-  // Free radar sprite (~85KB) only while doing OpenSky TLS — fixes HTTP -1 on CYD.
+  // Free radar sprite (~85KB) during network (OpenSky TLS + IP geo HTTP).
   skywatch.setNetworkHeapHooks(heapPauseForNetwork, heapResumeAfterNetwork);
 
   if (!skywatch.coordsWereOverridden()) {
+    skywatch.fetchHomeLocationFromIP();
+  } else {
+    Serial.printf("[Geo] Skipping IP lookup — coords already set (lat=%.5f lon=%.5f)\n",
+                  skywatch.getHomeLat(), skywatch.getHomeLon());
+  }
+
+  // If geo still failed, one more attempt after a short delay (hotspot DNS flakiness).
+  if (!skywatch.coordsWereOverridden() &&
+      fabsf(skywatch.getHomeLat()) < 0.0001f &&
+      fabsf(skywatch.getHomeLon()) < 0.0001f) {
+    Serial.println(F("[Geo] Retry after short delay..."));
+    delay(1000);
     skywatch.fetchHomeLocationFromIP();
   }
 
