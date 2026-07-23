@@ -34,7 +34,7 @@ concurrency:
 env:
   ESP32_CORE_VERSION: "3.3.10"
   FQBN: "esp32:esp32:esp32:PartitionScheme=huge_app,FlashSize=4M"
-  SKETCH_NAME: "Skywatch_CYD_build26_memory"
+  SKETCH_NAME: "Skywatch_CYD_build27_local_adsb"
   BUILD_DIR: "${{ github.workspace }}/build/skywatch"
 
 jobs:
@@ -47,11 +47,11 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Verify required Build 26 files
+      - name: Verify required Build 27 files
         shell: bash
         run: |
           required_files=(
-            "Skywatch_CYD_build26_memory.ino"
+            "Skywatch_CYD_build27_local_adsb.ino"
             "config.h"
             "CydSpi.h"
             "SkywatchData.h"
@@ -70,7 +70,7 @@ jobs:
 
           for file in "${required_files[@]}"; do
             if [[ ! -f "${file}" ]]; then
-              echo "::error file=${file}::Required Build 26 file is missing"
+              echo "::error file=${file}::Required Build 27 file is missing"
               exit 1
             fi
           done
@@ -155,7 +155,7 @@ jobs:
         run: |
           mkdir -p "${BUILD_DIR}"
           {
-            echo "SkyWatch Build 26 firmware"
+            echo "SkyWatch Build 27 firmware"
             echo "Commit: ${GITHUB_SHA}"
             echo "Ref: ${GITHUB_REF}"
             echo "Board: ${FQBN}"
@@ -170,7 +170,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: skywatch-build26-${{ github.sha }}
+          name: skywatch-build27-${{ github.sha }}
           path: |
             build/skywatch/*.bin
             build/skywatch/*.elf
@@ -184,7 +184,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: skywatch-build26-failure-${{ github.sha }}
+          name: skywatch-build27-failure-${{ github.sha }}
           path: |
             build/skywatch/compile.log
             build/skywatch/build-info.txt
