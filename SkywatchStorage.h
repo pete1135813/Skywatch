@@ -12,6 +12,7 @@ public:
   bool isReady() const;
   String statusText() const;
   bool ensureFolders();
+  bool loadRuntimeConfig(SkywatchData &data);
   void logEvent(const String &line);
   void recordAircraft(const Plane &p);
   void writeDailyStats(const SkywatchData &data);
