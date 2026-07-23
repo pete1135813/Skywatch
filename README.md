@@ -46,7 +46,7 @@ Skywatch shows nearby aircraft on a 320×240 landscape TFT, with touch navigatio
 1. Libraries: **TFT_eSPI**, **WiFiManager**, **XPT2046_Touchscreen**, **ArduinoJson**
 2. Open `Skywatch_CYD_build27_local_adsb.ino`
 3. Board: your ESP32 CYD profile · **Partition Scheme: Huge App**
-4. Copy `sd_card_files/` to the microSD and set `LocalADSBURL` in `/config/settings.txt              ← local ADS-B URL override`
+4. Copy `sd_card_files/` to the microSD and set `LocalADSBURL` in `/config/settings.txt`
 5. Upload
 
 ---
@@ -88,7 +88,7 @@ connections back off for 30 seconds so the display remains responsive.
 Copy `sd_card_files/` to the **root** of a FAT microSD:
 
 ```
-/config/settings.txt
+/config/settings.txt         ← local ADS-B URL override
 /logos/skywatch_logo.bmp    ← 24-bit uncompressed BMP, 320×240 recommended
 /events/
 /tracks/
