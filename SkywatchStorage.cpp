@@ -264,6 +264,46 @@ bool SkywatchStorage::ensureFolders() {
   return true;
 }
 
+bool SkywatchStorage::loadRuntimeConfig(SkywatchData &data) {
+  if (!ready) {
+    Serial.println(F("[Config] SD unavailable; using compiled defaults"));
+    return false;
+  }
+
+  claimBus();
+  File f = SD.open(SD_SETTINGS_PATH, FILE_READ);
+  if (!f) {
+    Serial.printf("[Config] %s not found; using compiled defaults\n", SD_SETTINGS_PATH);
+    return false;
+  }
+
+  bool applied = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0 || line.startsWith("#") || line.startsWith(";")) continue;
+
+    int separator = line.indexOf('=');
+    if (separator <= 0) continue;
+
+    String key = line.substring(0, separator);
+    String value = line.substring(separator + 1);
+    key.trim();
+    value.trim();
+
+    if (key.equalsIgnoreCase("LocalADSBURL") && value.length()) {
+      data.setLocalAdsbUrl(value);
+      applied = true;
+    }
+  }
+  f.close();
+
+  Serial.println(applied
+      ? F("[Config] Runtime settings applied")
+      : F("[Config] No runtime overrides found; using compiled defaults"));
+  return applied;
+}
+
 void SkywatchStorage::logEvent(const String &line) {
   if (!ready) return;
   claimBus();
