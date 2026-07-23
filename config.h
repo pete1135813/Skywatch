@@ -68,8 +68,7 @@ static const unsigned long LOCAL_ADSB_FAIL_BACKOFF_MS = 30000;
 static const uint16_t LOCAL_ADSB_CONNECT_TIMEOUT_MS = 1000;
 static const uint16_t LOCAL_ADSB_HTTP_TIMEOUT_MS = 1500;
 static const float LOCAL_ADSB_MAX_POSITION_AGE_SEC = 30.0f;
-// Filtered streaming parse: no full response String and no 65KB JSON allocation.
-static const size_t LOCAL_ADSB_JSON_CAPACITY = 32768;
+// Filtered streaming parse: no full response String and no fixed 65KB JSON allocation.
 
 #define OPENSKY_MODE_MANUAL_ONLY 0
 #define OPENSKY_MODE_60_SEC      1
