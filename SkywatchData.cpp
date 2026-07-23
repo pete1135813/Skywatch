@@ -31,6 +31,21 @@ String SkywatchData::getLastApiStatus() const { return lastApiStatus; }
 int SkywatchData::getLastHttpCode() const { return lastHttpCode; }
 String SkywatchData::getActiveSourceLabel() const { return activeSource; }
 String SkywatchData::getLocalStatus() const { return localStatus; }
+String SkywatchData::getLocalAdsbUrl() const { return localAdsbUrl; }
+
+void SkywatchData::setLocalAdsbUrl(const String &url) {
+  String candidate = url;
+  candidate.trim();
+  if (!candidate.startsWith("http://")) {
+    Serial.println(F("[Local ADS-B] Ignoring invalid URL (plain HTTP LAN URL required)"));
+    return;
+  }
+  localAdsbUrl = candidate;
+  lastLocalAttemptMs = 0;
+  localAdsbHealthy = false;
+  Serial.print(F("[Local ADS-B] Runtime URL: "));
+  Serial.println(localAdsbUrl);
+}
 
 int SkywatchData::getEventCount() const { return eventCount; }
 const SkyEvent& SkywatchData::getEvent(int index) const {
@@ -352,7 +367,7 @@ bool SkywatchData::openSkyAllowedNow() const {
 #if OPENSKY_CALL_MODE == OPENSKY_MODE_MANUAL_ONLY
   return openSkyManualRequest;
 #else
-  if (openSkyManualRequest) return true;
+  if (openSkyManualRequest || lastOpenSkyAttemptMs == 0) return true;
   return (millis() - lastOpenSkyAttemptMs) >= openSkyIntervalMs();
 #endif
 }
@@ -362,77 +377,128 @@ void SkywatchData::updatePlanes() {
   generateDemoTraffic();
   return;
 #elif SKYWATCH_DATA_SOURCE == DATA_SOURCE_LOCAL
-  if (fetchLocalAdsb()) return;
-  if (ENABLE_DEMO_FALLBACK) generateDemoTraffic();
+#if ENABLE_LOCAL_ADSB
+  if (localAdsbDueNow() && fetchLocalAdsb()) return;
+  if (localAdsbHealthy) return;
+#else
+  localStatus = "disabled";
+#endif
+  if (ENABLE_DEMO_FALLBACK && planeCount == 0) generateDemoTraffic();
   return;
 #elif SKYWATCH_DATA_SOURCE == DATA_SOURCE_OPENSKY
   if (openSkyAllowedNow() && fetchOpenSky()) return;
   if (ENABLE_DEMO_FALLBACK && planeCount == 0) generateDemoTraffic();
   return;
 #else
-  // AUTO: local receiver is primary, OpenSky is backup, demo keeps testing alive.
-  // Performance rule: do not block the UI probing a dead local ADS-B endpoint.
+  // AUTO: keep a healthy local receiver authoritative between rapid polls.
+  // When it fails, back off local probing and immediately allow OpenSky fallback.
 #if ENABLE_LOCAL_ADSB
-  if ((millis() - lastLocalAttemptMs) >= LOCAL_ADSB_INTERVAL_MS) {
+  if (localAdsbDueNow()) {
     if (fetchLocalAdsb()) return;
+  } else if (localAdsbHealthy) {
+    return;
   }
 #else
   localStatus = "disabled";
 #endif
 
-  if (openSkyAllowedNow()) {
-    if (fetchOpenSky()) return;
-  }
-
+  if (openSkyAllowedNow() && fetchOpenSky()) return;
   if (ENABLE_DEMO_FALLBACK && planeCount == 0) generateDemoTraffic();
 #endif
+}
+
+bool SkywatchData::localAdsbDueNow() const {
+  if (lastLocalAttemptMs == 0) return true;
+  unsigned long interval = localAdsbHealthy
+      ? LOCAL_ADSB_INTERVAL_MS
+      : LOCAL_ADSB_FAIL_BACKOFF_MS;
+  return (millis() - lastLocalAttemptMs) >= interval;
+}
+
+void SkywatchData::markLocalFailure(const String &status, int httpCode) {
+  localAdsbHealthy = false;
+  localStatus = status;
+  lastHttpCode = httpCode;
+  lastApiStatus = "LOCAL " + status;
+  Serial.print(F("[Local ADS-B] failed: "));
+  Serial.println(status);
 }
 
 bool SkywatchData::fetchLocalAdsb() {
 #if !ENABLE_LOCAL_ADSB
   localStatus = "disabled";
+  localAdsbHealthy = false;
   return false;
 #endif
   lastLocalAttemptMs = millis();
+
   if (WiFi.status() != WL_CONNECTED) {
-    localStatus = "WiFi down";
+    markLocalFailure("WiFi down");
+    return false;
+  }
+  if (localAdsbUrl.length() == 0) {
+    markLocalFailure("URL missing");
     return false;
   }
 
-  Serial.print("[Local ADS-B] Fetching: ");
-  Serial.println(LOCAL_ADSB_URL);
+  Serial.print(F("[Local ADS-B] Fetching: "));
+  Serial.println(localAdsbUrl);
 
   HTTPClient http;
+  http.setConnectTimeout(LOCAL_ADSB_CONNECT_TIMEOUT_MS);
   http.setTimeout(LOCAL_ADSB_HTTP_TIMEOUT_MS);
-  if (!http.begin(LOCAL_ADSB_URL)) {
-    localStatus = "begin failed";
+  http.setReuse(false);
+  http.useHTTP10(true);
+
+  if (!http.begin(localAdsbUrl)) {
+    markLocalFailure("begin failed");
     return false;
   }
+
   http.addHeader("Accept", "application/json");
-  http.addHeader("User-Agent", "Skywatch-CYD/2.4");
+  http.addHeader("User-Agent", "Skywatch-CYD/2.7");
+  http.addHeader("Connection", "close");
+
   int code = http.GET();
-  String payload = http.getString();
+  lastHttpCode = code;
+  if (code != 200) {
+    String status = (code < 0)
+        ? String("HTTP ") + http.errorToString(code)
+        : String("HTTP ") + String(code);
+    http.end();
+    markLocalFailure(status, code);
+    return false;
+  }
+
+  // Keep only fields Skywatch uses and deserialize directly from the socket.
+  // This avoids a full response String plus the old 65KB JSON allocation.
+  StaticJsonDocument<512> filter;
+  filter["aircraft"][0]["hex"] = true;
+  filter["aircraft"][0]["flight"] = true;
+  filter["aircraft"][0]["lat"] = true;
+  filter["aircraft"][0]["lon"] = true;
+  filter["aircraft"][0]["track"] = true;
+  filter["aircraft"][0]["gs"] = true;
+  filter["aircraft"][0]["seen"] = true;
+  filter["aircraft"][0]["seen_pos"] = true;
+  filter["aircraft"][0]["alt_baro"] = true;
+  filter["aircraft"][0]["alt_geom"] = true;
+
+  DynamicJsonDocument doc(LOCAL_ADSB_JSON_CAPACITY);
+  DeserializationError err = deserializeJson(
+      doc,
+      http.getStream(),
+      DeserializationOption::Filter(filter));
   http.end();
 
-  if (code != 200 || payload.length() == 0) {
-    localStatus = "HTTP " + String(code);
-    Serial.print("[Local ADS-B] failed: ");
-    Serial.println(localStatus);
-    return false;
-  }
-
-  DynamicJsonDocument doc(65536);
-  DeserializationError err = deserializeJson(doc, payload);
   if (err) {
-    localStatus = String("JSON ") + err.f_str();
-    Serial.print("[Local ADS-B] JSON parse failed: ");
-    Serial.println(err.f_str());
+    markLocalFailure(String("JSON ") + err.f_str(), code);
     return false;
   }
 
   JsonArray aircraft = doc["aircraft"].as<JsonArray>();
   if (aircraft.isNull()) {
-    localStatus = "No aircraft[]";
+    markLocalFailure("No aircraft[]", code);
     return false;
   }
 
@@ -441,6 +507,7 @@ bool SkywatchData::fetchLocalAdsb() {
   saveOldPlanes(oldPlanes, oldCount);
   clearPlanes();
 
+  int stalePositions = 0;
   for (JsonObject ac : aircraft) {
     if (planeCount >= MAX_PLANES) break;
     if (!ac.containsKey("lat") || !ac.containsKey("lon")) continue;
@@ -448,37 +515,50 @@ bool SkywatchData::fetchLocalAdsb() {
     float lat = ac["lat"] | NAN;
     float lon = ac["lon"] | NAN;
     if (isnan(lat) || isnan(lon)) continue;
+    if (lat < -90.0f || lat > 90.0f || lon < -180.0f || lon > 180.0f) continue;
+
+    float seenPos = ac["seen_pos"].isNull()
+        ? (ac["seen"] | 9999.0f)
+        : (ac["seen_pos"] | 9999.0f);
+    if (!isfinite(seenPos) || seenPos > LOCAL_ADSB_MAX_POSITION_AGE_SEC) {
+      stalePositions++;
+      continue;
+    }
 
     float distNm, bearingDeg;
     computeDistanceBearing(homeLat, homeLon, lat, lon, distNm, bearingDeg);
     if (distNm > MAX_RANGE_NM) continue;
 
     Plane &dst = planes[planeCount];
-    dst.icao = String((const char*)(ac["hex"] | ""));
+    dst.icao = String((const char *)(ac["hex"] | ""));
     dst.icao.trim();
-    dst.callsign = String((const char*)(ac["flight"] | ""));
+    dst.callsign = String((const char *)(ac["flight"] | ""));
     dst.callsign.trim();
     dst.distanceNm = distNm;
     dst.bearingDeg = bearingDeg;
-    dst.headingDeg = ac["track"] | 0.0;
-    dst.speedKt = ac["gs"] | 0.0;
-    dst.seenSecondsAgo = ac["seen"] | 0;
+    dst.headingDeg = ac["track"] | 0.0f;
+    dst.speedKt = ac["gs"] | 0.0f;
+    dst.seenSecondsAgo = (int)seenPos;
 
     float altFt = 0;
-    if (ac["alt_baro"].is<float>() || ac["alt_baro"].is<int>()) altFt = ac["alt_baro"] | 0;
-    else if (ac["alt_geom"].is<float>() || ac["alt_geom"].is<int>()) altFt = ac["alt_geom"] | 0;
+    if (ac["alt_baro"].is<float>() || ac["alt_baro"].is<int>()) {
+      altFt = ac["alt_baro"] | 0.0f;
+    } else if (ac["alt_geom"].is<float>() || ac["alt_geom"].is<int>()) {
+      altFt = ac["alt_geom"] | 0.0f;
+    }
     dst.altitudeFt = altFt;
-
     dst.valid = true;
     planeCount++;
   }
 
   finishPlaneSet(oldPlanes, oldCount);
   activeSource = "LOCAL";
+  localAdsbHealthy = true;
   localStatus = "OK";
   lastHttpCode = code;
   lastApiStatus = planeCount == 0 ? "LOCAL OK, 0" : "LOCAL OK";
-  Serial.printf("[Local ADS-B] Loaded %d planes\n", planeCount);
+  Serial.printf("[Local ADS-B] Loaded %d planes (%d stale positions skipped)\n",
+                planeCount, stalePositions);
   return true;
 }
 
