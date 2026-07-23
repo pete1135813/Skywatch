@@ -472,7 +472,7 @@ bool SkywatchData::fetchLocalAdsb() {
 
   // Keep only fields Skywatch uses and deserialize directly from the socket.
   // This avoids a full response String plus the old 65KB JSON allocation.
-  StaticJsonDocument<512> filter;
+  JsonDocument filter;
   filter["aircraft"][0]["hex"] = true;
   filter["aircraft"][0]["flight"] = true;
   filter["aircraft"][0]["lat"] = true;
@@ -484,7 +484,7 @@ bool SkywatchData::fetchLocalAdsb() {
   filter["aircraft"][0]["alt_baro"] = true;
   filter["aircraft"][0]["alt_geom"] = true;
 
-  DynamicJsonDocument doc(LOCAL_ADSB_JSON_CAPACITY);
+  JsonDocument doc;
   DeserializationError err = deserializeJson(
       doc,
       http.getStream(),
