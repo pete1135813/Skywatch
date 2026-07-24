@@ -67,7 +67,8 @@ static const unsigned long LOCAL_ADSB_INTERVAL_MS = 2000;
 static const unsigned long LOCAL_ADSB_FAIL_BACKOFF_MS = 30000;
 static const uint16_t LOCAL_ADSB_CONNECT_TIMEOUT_MS = 1000;
 static const uint16_t LOCAL_ADSB_HTTP_TIMEOUT_MS = 1500;
-// tar1090 keeps valid last-known positions after a reception gap; accept up to two minutes.\nstatic const float LOCAL_ADSB_MAX_POSITION_AGE_SEC = 120.0f;
+// tar1090 keeps valid last-known positions after a reception gap; accept up to two minutes.
+static const float LOCAL_ADSB_MAX_POSITION_AGE_SEC = 120.0f;
 // Filtered streaming parse: no full response String and no fixed 65KB JSON allocation.
 
 #define OPENSKY_MODE_MANUAL_ONLY 0
