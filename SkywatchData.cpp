@@ -507,27 +507,63 @@ bool SkywatchData::fetchLocalAdsb() {
   saveOldPlanes(oldPlanes, oldCount);
   clearPlanes();
 
+  const int sourceAircraft = aircraft.size();
+  int noPosition = 0;
+  int invalidPosition = 0;
+  int missingAge = 0;
   int stalePositions = 0;
+  int outOfRange = 0;
+  double freshestAgeSec = INFINITY;
+
   for (JsonObject ac : aircraft) {
     if (planeCount >= MAX_PLANES) break;
-    if (!ac.containsKey("lat") || !ac.containsKey("lon")) continue;
 
-    float lat = ac["lat"] | NAN;
-    float lon = ac["lon"] | NAN;
-    if (isnan(lat) || isnan(lon)) continue;
-    if (lat < -90.0f || lat > 90.0f || lon < -180.0f || lon > 180.0f) continue;
+    JsonVariant latValue = ac["lat"];
+    JsonVariant lonValue = ac["lon"];
+    if (latValue.isNull() || lonValue.isNull()) {
+      noPosition++;
+      continue;
+    }
 
-    float seenPos = ac["seen_pos"].isNull()
-        ? (ac["seen"] | 9999.0f)
-        : (ac["seen_pos"] | 9999.0f);
-    if (!isfinite(seenPos) || seenPos > LOCAL_ADSB_MAX_POSITION_AGE_SEC) {
+    // Use explicit numeric conversion. ArduinoJson's fallback operator can hide a
+    // failed conversion by returning the fallback value, which made fresh tracks
+    // look 9999 seconds old.
+    double lat = latValue.as<double>();
+    double lon = lonValue.as<double>();
+    if (!isfinite(lat) || !isfinite(lon) ||
+        lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
+      invalidPosition++;
+      continue;
+    }
+
+    JsonVariant seenPosValue = ac["seen_pos"];
+    JsonVariant seenValue = ac["seen"];
+    double seenPos = NAN;
+    if (!seenPosValue.isNull()) {
+      seenPos = seenPosValue.as<double>();
+    } else if (!seenValue.isNull()) {
+      seenPos = seenValue.as<double>();
+    } else {
+      missingAge++;
+      continue;
+    }
+
+    if (!isfinite(seenPos) || seenPos < 0.0) {
+      missingAge++;
+      continue;
+    }
+    if (seenPos < freshestAgeSec) freshestAgeSec = seenPos;
+    if (seenPos > LOCAL_ADSB_MAX_POSITION_AGE_SEC) {
       stalePositions++;
       continue;
     }
 
     float distNm, bearingDeg;
-    computeDistanceBearing(homeLat, homeLon, lat, lon, distNm, bearingDeg);
-    if (distNm > MAX_RANGE_NM) continue;
+    computeDistanceBearing(homeLat, homeLon, (float)lat, (float)lon, distNm, bearingDeg);
+    if (distNm > MAX_RANGE_NM) {
+      outOfRange++;
+      continue;
+    }
 
     Plane &dst = planes[planeCount];
     dst.icao = String((const char *)(ac["hex"] | ""));
@@ -536,15 +572,15 @@ bool SkywatchData::fetchLocalAdsb() {
     dst.callsign.trim();
     dst.distanceNm = distNm;
     dst.bearingDeg = bearingDeg;
-    dst.headingDeg = ac["track"] | 0.0f;
-    dst.speedKt = ac["gs"] | 0.0f;
+    dst.headingDeg = ac["track"].isNull() ? 0.0f : ac["track"].as<float>();
+    dst.speedKt = ac["gs"].isNull() ? 0.0f : ac["gs"].as<float>();
     dst.seenSecondsAgo = (int)seenPos;
 
-    float altFt = 0;
-    if (ac["alt_baro"].is<float>() || ac["alt_baro"].is<int>()) {
-      altFt = ac["alt_baro"] | 0.0f;
-    } else if (ac["alt_geom"].is<float>() || ac["alt_geom"].is<int>()) {
-      altFt = ac["alt_geom"] | 0.0f;
+    float altFt = 0.0f;
+    if (!ac["alt_baro"].isNull()) {
+      altFt = ac["alt_baro"].as<float>();
+    } else if (!ac["alt_geom"].isNull()) {
+      altFt = ac["alt_geom"].as<float>();
     }
     dst.altitudeFt = altFt;
     dst.valid = true;
@@ -557,8 +593,11 @@ bool SkywatchData::fetchLocalAdsb() {
   localStatus = "OK";
   lastHttpCode = code;
   lastApiStatus = planeCount == 0 ? "LOCAL OK, 0" : "LOCAL OK";
-  Serial.printf("[Local ADS-B] Loaded %d planes (%d stale positions skipped)\n",
-                planeCount, stalePositions);
+  Serial.printf(
+      "[Local ADS-B] Loaded %d/%d (noPos=%d invalid=%d noAge=%d stale=%d range=%d freshest=%.1fs)\n",
+      planeCount, sourceAircraft, noPosition, invalidPosition, missingAge,
+      stalePositions, outOfRange,
+      isfinite(freshestAgeSec) ? freshestAgeSec : -1.0);
   return true;
 }
 
