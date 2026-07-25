@@ -73,12 +73,12 @@ local feed authoritative, and uses OpenSky when the receiver cannot be reached.
 Edit the SD card file `/config/settings.txt`:
 
 ```text
-LocalADSBURL=http://192.168.1.220:8080/tar1090/data/aircraft.json
+LocalADSBURL=http://192.168.1.64:8080/tar1090/data/aircraft.json
 ```
 
 Replace the address with the LAN IP and port of your readsb/tar1090 host. The URL
 must be reachable from another device on the same network. Local positions older
-than 30 seconds are ignored. A healthy feed is polled every 2 seconds; failed
+than 120 seconds are ignored. A healthy feed is polled every 2 seconds; failed
 connections back off for 30 seconds so the display remains responsive.
 
 ---
