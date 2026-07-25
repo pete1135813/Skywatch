@@ -7,7 +7,7 @@
 
 #include <Arduino.h>
 
-static const char BUILD_LABEL[] = "Build 26 Memory";
+static const char BUILD_LABEL[] = "Build 27 Local ADS-B";
 
 // ---------------------- DISPLAY ----------------------
 static const int SCREEN_WIDTH  = 320;
@@ -53,19 +53,23 @@ static const int TOUCH_MAX_Y = 3800;
 #define DATA_SOURCE_OPENSKY  2
 #define DATA_SOURCE_DEMO     3
 
-#define SKYWATCH_DATA_SOURCE DATA_SOURCE_OPENSKY
+#define SKYWATCH_DATA_SOURCE DATA_SOURCE_AUTO
 
 // Local ADS-B receiver endpoints usually look like one of these:
 //   http://192.168.1.xxx/tar1090/data/aircraft.json
 //   http://192.168.1.xxx/dump1090-fa/data/aircraft.json
 //   http://192.168.1.xxx/data/aircraft.json
-static const char LOCAL_ADSB_URL[] = "http://192.168.1.220/tar1090/data/aircraft.json";
-// Keep this OFF until your RTL-SDR/tar1090/readsb endpoint is actually running.
-// A dead local endpoint can stall the UI if we probe it too aggressively.
-#define ENABLE_LOCAL_ADSB 0
-static const unsigned long LOCAL_ADSB_INTERVAL_MS = 30000;
+// Runtime override: /config/settings.txt -> LocalADSBURL=...
+static const char LOCAL_ADSB_URL_DEFAULT[] = "http://192.168.1.64:8080/tar1090/data/aircraft.json";
+#define ENABLE_LOCAL_ADSB 1
+// Healthy local receivers update rapidly; failures back off so the UI stays responsive.
+static const unsigned long LOCAL_ADSB_INTERVAL_MS = 2000;
 static const unsigned long LOCAL_ADSB_FAIL_BACKOFF_MS = 30000;
-static const uint16_t LOCAL_ADSB_HTTP_TIMEOUT_MS = 250;
+static const uint16_t LOCAL_ADSB_CONNECT_TIMEOUT_MS = 1000;
+static const uint16_t LOCAL_ADSB_HTTP_TIMEOUT_MS = 1500;
+// tar1090 keeps valid last-known positions after a reception gap; accept up to two minutes.
+static const float LOCAL_ADSB_MAX_POSITION_AGE_SEC = 120.0f;
+// Filtered streaming parse: no full response String and no fixed 65KB JSON allocation.
 
 #define OPENSKY_MODE_MANUAL_ONLY 0
 #define OPENSKY_MODE_60_SEC      1
@@ -122,6 +126,7 @@ static const uint32_t SD_SPI_HZ = 10000000;
 static const char SD_LOGO_PATH[] = "/logos/skywatch_logo.bmp";
 static const char SD_LOGO_PATH_ALT[] = "/skywatch_logo.bmp";
 static const char SD_EVENT_LOG_PATH[] = "/events/events.txt";
+static const char SD_SETTINGS_PATH[] = "/config/settings.txt";
 // Splash BMP color fixes (24-bit BMP is BGR on disk; CYD/TFT_eSPI often needs tweaks):
 //   SWAP_BYTES — required for most TFT_eSPI pushImage RGB565 buffers (try this first)
 //   INVERT     — photographic negative look (black<->white); set 0 if only hues were wrong

@@ -1,5 +1,5 @@
 /*
-   SKYWATCH v2.1 CYD Port — Build 26 Memory (fixed)
+   SKYWATCH v2.1 CYD Port — Build 27 Local ADS-B
 
    Target:
    - ESP32 Cheap Yellow Display / ESP32-2432S028R style board
@@ -12,10 +12,11 @@
    - Web dashboard with /, /planes, /coords
    - Battery monitor
 
-   Build 26:
-   - SD aircraft profile memory + daily stats
-   - SPI bus ownership between SD and touch (CydSpi.h)
-   - NTP wall-clock timestamps for SD logs
+   Build 27:
+   - Local readsb/tar1090 is the primary low-latency source
+   - Heap-safe filtered JSON streaming with position freshness checks
+   - OpenSky fallback and SD-configurable local receiver URL
+   - Build 26 SD memory, SPI ownership, and NTP behavior preserved
 */
 
 #include <WiFi.h>
@@ -77,7 +78,7 @@ void updateAircraftMemory() {
   storage.writeDailyStats(skywatch);
 }
 
-// Called only around OpenSky HTTPS so mbedTLS has contiguous heap for TLS.
+// Used around heap-heavy external network requests so large allocations stay contiguous.
 void heapPauseForNetwork() { display.pauseHeavyBuffers(); }
 void heapResumeAfterNetwork() { display.resumeHeavyBuffers(); }
 
@@ -121,6 +122,7 @@ void setup() {
   display.ensureRadarSprite();
 
   skywatch.begin();
+  storage.loadRuntimeConfig(skywatch);
   input.begin();
   display.showSystemCheck(skywatch);
   if (!display.splashLogoOk()) {
@@ -148,7 +150,7 @@ void setup() {
 
   ntpSynced = syncNtpTime();
 
-  // Free radar sprite (~85KB) during network (OpenSky TLS + IP geo HTTP).
+  // Free radar sprite (~85KB) when a network operation explicitly requests heap headroom.
   skywatch.setNetworkHeapHooks(heapPauseForNetwork, heapResumeAfterNetwork);
 
   if (!skywatch.coordsWereOverridden()) {

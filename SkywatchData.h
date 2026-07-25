@@ -73,6 +73,8 @@ public:
   int getLastHttpCode() const;
   String getActiveSourceLabel() const;
   String getLocalStatus() const;
+  String getLocalAdsbUrl() const;
+  void setLocalAdsbUrl(const String &url);
   String getOpenSkyModeLabel() const;
 
   int getEventCount() const;
@@ -101,6 +103,8 @@ private:
   int lastHttpCode = 0;
   String activeSource = "BOOT";
   String localStatus = "Not tried";
+  String localAdsbUrl = LOCAL_ADSB_URL_DEFAULT;
+  bool localAdsbHealthy = false;
 
   unsigned long lastLocalAttemptMs = 0;
   unsigned long lastOpenSkyAttemptMs = 0;
@@ -117,6 +121,8 @@ private:
   void addEvent(const String &type, const Plane &p);
 
   bool fetchLocalAdsb();
+  bool localAdsbDueNow() const;
+  void markLocalFailure(const String &status, int httpCode = 0);
   bool fetchOpenSky();
   bool applyOpenSkyStates(JsonVariant root);
   bool tryParseGeoPayload(const String &payload, float &lat, float &lon);
