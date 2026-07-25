@@ -12,7 +12,7 @@ Build 27:
 - Failed local connections back off for 30 seconds.
 - OpenSky is allowed immediately when the local receiver is unavailable.
 - Local JSON is filtered and parsed directly from the HTTP stream.
-- Positions older than 30 seconds are discarded using seen_pos.
+- Positions older than 120 seconds are discarded using seen_pos.
 - The local receiver URL can be changed on the SD card without recompiling.
 - Build 26 aircraft profiles, daily stats, SD logging, NTP, touch, splash,
   observer alerts, and heap-safe OpenSky TLS behavior are preserved.
@@ -26,7 +26,7 @@ Local ADS-B setup:
 5) Insert the SD card and boot Skywatch.
 
 Tested workshop endpoint:
-  http://192.168.1.220:8080/tar1090/data/aircraft.json
+  http://192.168.1.64:8080/tar1090/data/aircraft.json
 
 Data source order:
   LOCAL ADS-B -> OpenSky -> Demo
