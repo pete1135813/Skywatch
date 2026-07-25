@@ -320,13 +320,21 @@ void SkywatchStorage::rotateEventLogIfNeeded() {
   }
 }
 
-void SkywatchStorage::logEvent(const SkyEvent &event) {
-  if (!ready) return;
+bool SkywatchStorage::logEvent(const SkyEvent &event) {
+  if (!ready) {
+    historyStatus = "SD unavailable";
+    Serial.println(F("[SD] Event log skipped: storage not ready"));
+    return false;
+  }
   claimBus();
   rotateEventLogIfNeeded();
 
   File f = SD.open(SD_EVENT_LOG_PATH, FILE_APPEND);
-  if (!f) return;
+  if (!f) {
+    historyStatus = "Event log open failed";
+    Serial.printf("[SD] Event log open failed: %s\n", SD_EVENT_LOG_PATH);
+    return false;
+  }
 
   String type = event.type;
   String callsign = event.callsign;
@@ -338,11 +346,25 @@ void SkywatchStorage::logEvent(const SkyEvent &event) {
   if (callsign.length() == 0) callsign = "UNKNOWN";
 
   String ts = timestamp();
-  f.printf("%s|%s|%s|%.1f|%.1f|%d|%u\n",
-           ts.c_str(), type.c_str(), callsign.c_str(),
-           event.distanceNm, event.cpaNm, event.etaSec,
-           (unsigned)event.threatLevel);
+  size_t written = f.printf("%s|%s|%s|%.1f|%.1f|%d|%u\n",
+                            ts.c_str(), type.c_str(), callsign.c_str(),
+                            event.distanceNm, event.cpaNm, event.etaSec,
+                            (unsigned)event.threatLevel);
+  f.flush();
+  size_t fileSize = f.size();
   f.close();
+
+  if (written == 0) {
+    historyStatus = "Event log write failed";
+    Serial.printf("[SD] Event log write failed: %s\n", SD_EVENT_LOG_PATH);
+    return false;
+  }
+
+  historyStatus = "New event saved";
+  Serial.printf("[SD] Event logged: %s %s (%u bytes, file %u bytes)\n",
+                type.c_str(), callsign.c_str(), (unsigned)written,
+                (unsigned)fileSize);
+  return true;
 }
 
 bool SkywatchStorage::parseEventLine(char *line, StoredEvent &out) const {
@@ -388,18 +410,35 @@ bool SkywatchStorage::parseEventLine(char *line, StoredEvent &out) const {
 int SkywatchStorage::loadRecentEvents() {
   historyCount = 0;
   for (int i = 0; i < EVENT_HISTORY_MAX_ENTRIES; i++) history[i] = StoredEvent();
-  if (!ready) return 0;
+  if (!ready) {
+    historyStatus = "SD unavailable";
+    Serial.println(F("[SD] History load skipped: storage not ready"));
+    return 0;
+  }
 
   claimBus();
   File f = SD.open(SD_EVENT_LOG_PATH, FILE_READ);
-  if (!f) return 0;
+  if (!f) {
+    historyStatus = "No event log file";
+    Serial.printf("[SD] History file not found/openable: %s\n", SD_EVENT_LOG_PATH);
+    return 0;
+  }
 
   const size_t fileSize = f.size();
+  if (fileSize == 0) {
+    f.close();
+    historyStatus = "Event log is empty";
+    Serial.printf("[SD] History file is empty: %s\n", SD_EVENT_LOG_PATH);
+    return 0;
+  }
   const size_t start = fileSize > EVENT_HISTORY_TAIL_BYTES
       ? fileSize - EVENT_HISTORY_TAIL_BYTES
       : 0;
   if (!f.seek(start)) {
     f.close();
+    historyStatus = "Event log seek failed";
+    Serial.printf("[SD] History seek failed: %s offset %u\n",
+                  SD_EVENT_LOG_PATH, (unsigned)start);
     return 0;
   }
 
@@ -413,12 +452,19 @@ int SkywatchStorage::loadRecentEvents() {
   if (start > 0) {
     // The tail may begin in the middle of a line; discard that partial record.
     char *firstNewline = strchr(cursor, '\n');
-    if (!firstNewline) return 0;
+    if (!firstNewline) {
+      historyStatus = "No complete history rows";
+      Serial.printf("[SD] History tail has no complete line (%u bytes)\n",
+                    (unsigned)bytes);
+      return 0;
+    }
     cursor = firstNewline + 1;
   }
 
   StoredEvent chronological[EVENT_HISTORY_MAX_ENTRIES];
   int chronologicalCount = 0;
+  int lineCount = 0;
+  int rejectedCount = 0;
   char *lineSave = nullptr;
   for (char *line = strtok_r(cursor, "\n", &lineSave);
        line;
@@ -428,8 +474,12 @@ int SkywatchStorage::loadRecentEvents() {
       line[--len] = '\0';
     }
 
+    lineCount++;
     StoredEvent parsed;
-    if (!parseEventLine(line, parsed)) continue;
+    if (!parseEventLine(line, parsed)) {
+      rejectedCount++;
+      continue;
+    }
 
     if (chronologicalCount < EVENT_HISTORY_MAX_ENTRIES) {
       chronological[chronologicalCount++] = parsed;
@@ -446,13 +496,27 @@ int SkywatchStorage::loadRecentEvents() {
     history[i] = chronological[chronologicalCount - 1 - i];
   }
 
-  Serial.printf("[SD] Loaded %d recent events from %u-byte tail\n",
-                historyCount, (unsigned)bytes);
+  if (historyCount > 0) {
+    historyStatus = String(historyCount) + " event" +
+                    (historyCount == 1 ? "" : "s") + " loaded";
+  } else if (lineCount == 0) {
+    historyStatus = "Event log has no rows";
+  } else {
+    historyStatus = String("0 parsed / ") + lineCount + " rows";
+  }
+
+  Serial.printf("[SD] History: file=%u tail=%u lines=%d loaded=%d rejected=%d\n",
+                (unsigned)fileSize, (unsigned)bytes, lineCount,
+                historyCount, rejectedCount);
   return historyCount;
 }
 
 int SkywatchStorage::getHistoryCount() const {
   return historyCount;
+}
+
+String SkywatchStorage::getHistoryStatus() const {
+  return historyStatus;
 }
 
 const StoredEvent& SkywatchStorage::getHistoryEvent(int index) const {
