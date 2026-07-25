@@ -87,8 +87,11 @@ void logPendingEvents() {
   for (int i = skywatch.getEventCount() - 1; i >= 0; i--) {
     const SkyEvent &e = skywatch.getEvent(i);
     if (!e.logged) {
-      storage.logEvent(e);
-      skywatch.markEventLogged(i);
+      // Only retire the in-memory event after the SD append succeeds. A failed
+      // open/write is retried on the next loop instead of silently losing history.
+      if (storage.logEvent(e)) {
+        skywatch.markEventLogged(i);
+      }
     }
   }
 }
