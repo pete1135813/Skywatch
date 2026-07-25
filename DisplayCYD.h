@@ -52,8 +52,14 @@ private:
   bool listHistoryMode = false;
   bool historyLoaded = false;
   unsigned long lastHistoryLoadMs = 0;
+  bool pageFullRedraw = true;
+  uint32_t lastPageSignature = 0;
+  uint32_t lastRadarSignature = 0;
+  bool radarBaseDrawn = false;
+  float previousSweepAngle = -1.0f;
 
-  // Flicker control: chrome (status/menu/RFRSH) is not redrawn at radar FPS.
+  // Flicker control: static page content and radar chrome are only repainted
+  // when their data changes.
   ScreenMode lastScreen = SCREEN_SYSTEM; // force first paint as "changed"
   unsigned long lastChromeMs = 0;
   bool lastRefreshPending = false;
@@ -62,8 +68,10 @@ private:
   bool menuDrawnForScreen = false;
 
   void renderRadarSprite(const SkywatchData &data);
+  uint32_t contentSignature(ScreenMode screen, const SkywatchData &data) const;
   void drawRadarGrid();
   void drawRadarSweep();
+  void erasePreviousRadarSweep();
   void drawPlaneTrail(const Plane &p);
   void drawPlaneTarget(const Plane &p, int index);
   void drawAircraftTriangle(int x, int y, float headingDeg, uint16_t col);
