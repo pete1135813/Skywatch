@@ -25,10 +25,11 @@ public:
   String statusText() const;
   bool ensureFolders();
   bool loadRuntimeConfig(SkywatchData &data);
-  void logEvent(const SkyEvent &event);
+  bool logEvent(const SkyEvent &event);
   int loadRecentEvents();
   int getHistoryCount() const;
   const StoredEvent& getHistoryEvent(int index) const;
+  String getHistoryStatus() const;
   void recordAircraft(const Plane &p);
   void writeDailyStats(const SkywatchData &data);
   bool fileExists(const char *path) const;
@@ -38,6 +39,7 @@ private:
   String status = "Not initialized";
   StoredEvent history[EVENT_HISTORY_MAX_ENTRIES];
   int historyCount = 0;
+  String historyStatus = "Not loaded";
 
   void claimBus() const;
   String safeId(const String &raw) const;
