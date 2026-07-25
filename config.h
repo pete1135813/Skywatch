@@ -60,7 +60,7 @@ static const int TOUCH_MAX_Y = 3800;
 //   http://192.168.1.xxx/dump1090-fa/data/aircraft.json
 //   http://192.168.1.xxx/data/aircraft.json
 // Runtime override: /config/settings.txt -> LocalADSBURL=...
-static const char LOCAL_ADSB_URL_DEFAULT[] = "http://192.168.1.220:8080/tar1090/data/aircraft.json";
+static const char LOCAL_ADSB_URL_DEFAULT[] = "http://192.168.1.64:8080/tar1090/data/aircraft.json";
 #define ENABLE_LOCAL_ADSB 1
 // Healthy local receivers update rapidly; failures back off so the UI stays responsive.
 static const unsigned long LOCAL_ADSB_INTERVAL_MS = 2000;
