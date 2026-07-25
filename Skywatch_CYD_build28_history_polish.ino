@@ -91,6 +91,11 @@ void logPendingEvents() {
       // open/write is retried on the next loop instead of silently losing history.
       if (storage.logEvent(e)) {
         skywatch.markEventLogged(i);
+        yield();
+      } else {
+        // One SD fault used to make us hammer the same path once per pending
+        // event, starving WiFi/display work. Storage owns the timed retry.
+        break;
       }
     }
   }
