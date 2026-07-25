@@ -260,10 +260,14 @@ bool SkywatchStorage::ensureFolders() {
   if (!ready) return false;
   claimBus();
   const char *dirs[] = {"/events", "/tracks", "/planes", "/stats", "/config", "/logos"};
+  bool allReady = true;
   for (uint8_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
-    if (!SD.exists(dirs[i])) SD.mkdir(dirs[i]);
+    if (!SD.exists(dirs[i]) && !SD.mkdir(dirs[i])) {
+      allReady = false;
+      Serial.printf("[SD] Folder create failed: %s\n", dirs[i]);
+    }
   }
-  return true;
+  return allReady;
 }
 
 bool SkywatchStorage::loadRuntimeConfig(SkywatchData &data) {
@@ -320,19 +324,80 @@ void SkywatchStorage::rotateEventLogIfNeeded() {
   }
 }
 
+bool SkywatchStorage::ensureEventLogPath() {
+  File eventsDir = SD.open("/events", FILE_READ);
+  if (eventsDir) {
+    bool isDirectory = eventsDir.isDirectory();
+    eventsDir.close();
+    if (!isDirectory) {
+      scheduleEventLogRetry("/events exists but is not a folder");
+      return false;
+    }
+    return true;
+  }
+
+  if (!SD.mkdir("/events")) {
+    scheduleEventLogRetry("could not create /events folder");
+    return false;
+  }
+
+  eventsDir = SD.open("/events", FILE_READ);
+  bool created = eventsDir && eventsDir.isDirectory();
+  if (eventsDir) eventsDir.close();
+  if (!created) {
+    scheduleEventLogRetry("/events folder verification failed");
+    return false;
+  }
+
+  Serial.println(F("[SD] Recreated missing /events folder"));
+  return true;
+}
+
+void SkywatchStorage::scheduleEventLogRetry(const char *reason) {
+  if (eventLogFailureCount < 6) eventLogFailureCount++;
+
+  // 5s, 10s, 20s, then 30s. One failing SD path must never monopolize loop().
+  uint8_t shift = min((int)eventLogFailureCount - 1, 3);
+  unsigned long retryDelayMs = 5000UL << shift;
+  if (retryDelayMs > 30000UL) retryDelayMs = 30000UL;
+  eventLogRetryAfterMs = millis() + retryDelayMs;
+
+  historyStatus = String(reason) + " - retry " + String(retryDelayMs / 1000UL) + "s";
+  Serial.printf("[SD] Event logger paused: %s; retry in %lus\n",
+                reason, retryDelayMs / 1000UL);
+}
+
 bool SkywatchStorage::logEvent(const SkyEvent &event) {
   if (!ready) {
     historyStatus = "SD unavailable";
     Serial.println(F("[SD] Event log skipped: storage not ready"));
     return false;
   }
+
+  // Signed subtraction keeps this comparison safe across millis() rollover.
+  if (eventLogRetryAfterMs != 0 &&
+      (int32_t)(millis() - eventLogRetryAfterMs) < 0) {
+    return false;
+  }
+
   claimBus();
+  if (!ensureEventLogPath()) return false;
   rotateEventLogIfNeeded();
 
+  bool fileExisted = SD.exists(SD_EVENT_LOG_PATH);
   File f = SD.open(SD_EVENT_LOG_PATH, FILE_APPEND);
+  if (!f && !fileExisted) {
+    // Some SD/FAT combinations do not create a new file in append mode.
+    // Create it once with write mode, then reopen without risking truncation.
+    File created = SD.open(SD_EVENT_LOG_PATH, FILE_WRITE);
+    if (created) {
+      created.close();
+      f = SD.open(SD_EVENT_LOG_PATH, FILE_APPEND);
+      if (f) Serial.println(F("[SD] Created missing event log file"));
+    }
+  }
   if (!f) {
-    historyStatus = "Event log open failed";
-    Serial.printf("[SD] Event log open failed: %s\n", SD_EVENT_LOG_PATH);
+    scheduleEventLogRetry("event log open failed");
     return false;
   }
 
@@ -355,11 +420,15 @@ bool SkywatchStorage::logEvent(const SkyEvent &event) {
   f.close();
 
   if (written == 0) {
-    historyStatus = "Event log write failed";
-    Serial.printf("[SD] Event log write failed: %s\n", SD_EVENT_LOG_PATH);
+    scheduleEventLogRetry("event log write failed");
     return false;
   }
 
+  if (eventLogFailureCount > 0) {
+    Serial.println(F("[SD] Event logger recovered"));
+  }
+  eventLogFailureCount = 0;
+  eventLogRetryAfterMs = 0;
   historyStatus = "New event saved";
   Serial.printf("[SD] Event logged: %s %s (%u bytes, file %u bytes)\n",
                 type.c_str(), callsign.c_str(), (unsigned)written,
