@@ -40,8 +40,12 @@ private:
   StoredEvent history[EVENT_HISTORY_MAX_ENTRIES];
   int historyCount = 0;
   String historyStatus = "Not loaded";
+  uint8_t eventLogFailureCount = 0;
+  unsigned long eventLogRetryAfterMs = 0;
 
   void claimBus() const;
+  bool ensureEventLogPath();
+  void scheduleEventLogRetry(const char *reason);
   String safeId(const String &raw) const;
   String timestamp() const;
   bool timeIsValid() const;
