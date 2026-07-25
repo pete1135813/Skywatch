@@ -1,5 +1,6 @@
 #include "SkywatchData.h"
 #include <math.h>
+#include <Preferences.h>
 #include <time.h>
 
 static Plane EMPTY_PLANE;
@@ -19,11 +20,72 @@ void SkywatchData::setHomeCoords(float lat, float lon, bool overridden) {
   homeLat = lat;
   homeLon = lon;
   coordsOverridden = overridden;
+  homeLocationSource = overridden ? "manual" : "IP lookup";
+}
+
+bool SkywatchData::loadSavedHomeCoords() {
+  Preferences prefs;
+  if (!prefs.begin("skywatch", true)) {
+    Serial.println(F("[Coords] NVS open failed"));
+    return false;
+  }
+
+  bool valid = prefs.getBool("home_valid", false);
+  double lat = prefs.getDouble("home_lat", NAN);
+  double lon = prefs.getDouble("home_lon", NAN);
+  prefs.end();
+
+  if (!valid || !isfinite(lat) || !isfinite(lon) ||
+      lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
+    return false;
+  }
+
+  setHomeCoords((float)lat, (float)lon, true);
+  homeLocationSource = "saved manual";
+  Serial.printf("[Coords] Loaded saved location lat=%.6f lon=%.6f\n", homeLat, homeLon);
+  return true;
+}
+
+bool SkywatchData::saveHomeCoords(float lat, float lon) {
+  if (!isfinite(lat) || !isfinite(lon) ||
+      lat < -90.0f || lat > 90.0f || lon < -180.0f || lon > 180.0f) {
+    return false;
+  }
+
+  Preferences prefs;
+  if (!prefs.begin("skywatch", false)) return false;
+  bool ok = prefs.putDouble("home_lat", (double)lat) == sizeof(double);
+  ok = (prefs.putDouble("home_lon", (double)lon) == sizeof(double)) && ok;
+  ok = (prefs.putBool("home_valid", true) == sizeof(bool)) && ok;
+  prefs.end();
+
+  if (!ok) return false;
+  setHomeCoords(lat, lon, true);
+  homeLocationSource = "saved manual";
+  Serial.printf("[Coords] Saved location lat=%.6f lon=%.6f\n", homeLat, homeLon);
+  return true;
+}
+
+bool SkywatchData::clearSavedHomeCoords() {
+  Preferences prefs;
+  if (!prefs.begin("skywatch", false)) return false;
+  prefs.remove("home_valid");
+  prefs.remove("home_lat");
+  prefs.remove("home_lon");
+  prefs.end();
+
+  coordsOverridden = false;
+  homeLat = 0.0f;
+  homeLon = 0.0f;
+  homeLocationSource = "unset";
+  Serial.println(F("[Coords] Cleared saved location"));
+  return true;
 }
 
 float SkywatchData::getHomeLat() const { return homeLat; }
 float SkywatchData::getHomeLon() const { return homeLon; }
 bool SkywatchData::coordsWereOverridden() const { return coordsOverridden; }
+String SkywatchData::getHomeLocationSource() const { return homeLocationSource; }
 int SkywatchData::getPlaneCount() const { return planeCount; }
 float SkywatchData::getBatteryPercent() const { return batteryPercent; }
 unsigned long SkywatchData::getLastPlaneUpdateMs() const { return lastPlaneUpdateMs; }
@@ -326,9 +388,7 @@ void SkywatchData::fetchHomeLocationFromIP() {
   }
 
   if (ok) {
-    homeLat = lat;
-    homeLon = lon;
-    // Keep coordsOverridden false so this still counts as IP lookup on SYSTEM page.
+    setHomeCoords(lat, lon, false);
     Serial.printf("[Geo] Location from IP: lat=%.6f lon=%.6f\n", homeLat, homeLon);
   } else {
     Serial.println(F("[Geo] FAILED — home stays 0,0 until set on web dashboard /coords"));

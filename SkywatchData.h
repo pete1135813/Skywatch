@@ -60,9 +60,13 @@ public:
   void setNetworkHeapHooks(HeapHook beforeNet, HeapHook afterNet);
 
   void setHomeCoords(float lat, float lon, bool overridden = true);
+  bool loadSavedHomeCoords();
+  bool saveHomeCoords(float lat, float lon);
+  bool clearSavedHomeCoords();
   float getHomeLat() const;
   float getHomeLon() const;
   bool coordsWereOverridden() const;
+  String getHomeLocationSource() const;
 
   int getPlaneCount() const;
   const Plane& getPlane(int index) const;
@@ -96,6 +100,7 @@ private:
   float homeLat = 0.0f;
   float homeLon = 0.0f;
   bool coordsOverridden = false;
+  String homeLocationSource = "unset";
 
   float batteryPercent = 100.0f;
   unsigned long lastPlaneUpdateMs = 0;

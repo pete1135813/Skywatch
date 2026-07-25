@@ -1,8 +1,10 @@
 #include "DisplayCYD.h"
 #include <math.h>
+#include <string.h>
 #include <WiFi.h>
 #include <SD.h>
 #include "CydSpi.h"
+#include "SkywatchStorage.h"
 
 void DisplayCYD::begin() {
   tft.init();
@@ -44,6 +46,18 @@ void DisplayCYD::resumeHeavyBuffers() {
 void DisplayCYD::setStorageStatus(bool ready, const String &status) {
   sdReady = ready;
   sdStatus = status;
+}
+
+void DisplayCYD::setStorage(SkywatchStorage *storageRef) {
+  storage = storageRef;
+}
+
+void DisplayCYD::setListHistoryMode(bool active) {
+  if (listHistoryMode == active) return;
+  listHistoryMode = active;
+  historyLoaded = false;
+  lastHistoryLoadMs = 0;
+  menuDrawnForScreen = false;
 }
 
 bool DisplayCYD::drawBmpFromSD(const char *filename, int16_t x, int16_t y) {
@@ -866,26 +880,125 @@ void DisplayCYD::drawAlertBanner(const SkywatchData &data) {
 #endif
 }
 
-void DisplayCYD::drawAircraftList(const SkywatchData &data) {
-  // Leave the bottom touch bar alone unless this is the first paint on this page.
-  tft.fillRect(0, 0, SCREEN_WIDTH, TOUCH_BAR_Y, TFT_BLACK);
-  drawTopBar("AIRCRAFT LIST", data);
+void DisplayCYD::drawListTabs() {
+  const int gap = 4;
+  const int tabWidth = (SCREEN_WIDTH - gap * 3) / 2;
+  const int leftX = gap;
+  const int rightX = leftX + tabWidth + gap;
+
+  auto drawTab = [&](int x, const char *label, bool active) {
+    uint16_t fill = active ? TFT_CYAN : TFT_BLACK;
+    uint16_t text = active ? TFT_BLACK : TFT_CYAN;
+    tft.fillRoundRect(x, LIST_TAB_Y, tabWidth, LIST_TAB_H, 3, fill);
+    tft.drawRoundRect(x, LIST_TAB_Y, tabWidth, LIST_TAB_H, 3, TFT_CYAN);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextSize(1);
+    tft.setTextColor(text, fill);
+    tft.drawString(label, x + tabWidth / 2, LIST_TAB_Y + LIST_TAB_H / 2);
+  };
+
+  drawTab(leftX, "LIVE AIRCRAFT", !listHistoryMode);
+  drawTab(rightX, "HISTORY", listHistoryMode);
+}
+
+void DisplayCYD::drawEventHistory(const SkywatchData &data) {
+  const unsigned long now = millis();
+  if (storage && (!historyLoaded ||
+      now - lastHistoryLoadMs >= EVENT_HISTORY_REFRESH_MS)) {
+    storage->loadRecentEvents();
+    historyLoaded = true;
+    lastHistoryLoadMs = now;
+  }
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.drawString("CALL", 6, 28);
-  tft.drawString("DIST", 70, 28);
-  tft.drawString("DIR", 108, 28);
-  tft.drawString("CPA", 142, 28);
-  tft.drawString("ETA", 182, 28);
-  tft.drawString("THR", 224, 28);
-  tft.drawString("ALT", 262, 28);
-  tft.drawLine(0, 42, SCREEN_WIDTH, 42, TFT_DARKGREEN);
+  tft.drawString("TIME", 6, 52);
+  tft.drawString("EVENT", 50, 52);
+  tft.drawString("CALL", 128, 52);
+  tft.drawString("DIST", 198, 52);
+  tft.drawString("CPA", 236, 52);
+  tft.drawString("THR", 278, 52);
+  tft.drawLine(0, 65, SCREEN_WIDTH, 65, TFT_DARKGREEN);
+
+  int count = storage ? storage->getHistoryCount() : 0;
+  const int visibleRows = 8;
+  for (int i = 0; i < count && i < visibleRows; i++) {
+    const StoredEvent &event = storage->getHistoryEvent(i);
+    int y = 72 + i * 15;
+
+    String timeLabel = event.timestamp;
+    if (timeLabel.length() >= 16 && timeLabel.charAt(10) == ' ') {
+      timeLabel = timeLabel.substring(11, 16);
+    } else if (timeLabel.length() > 7) {
+      timeLabel = timeLabel.substring(0, 7);
+    }
+
+    String eventLabel = event.type;
+    if (eventLabel == "NEW_TARGET") eventLabel = "NEW";
+    else if (eventLabel == "APPROACHING") eventLabel = "APPROACH";
+    else if (eventLabel == "THREAT_UP") eventLabel = "THREAT UP";
+    if (eventLabel.length() > 10) eventLabel = eventLabel.substring(0, 10);
+
+    String callsign = event.callsign;
+    if (callsign.length() > 8) callsign = callsign.substring(0, 8);
+
+    uint16_t color = threatColor(event.threatLevel);
+    if (strcmp(event.type, "NEW_TARGET") == 0) color = TFT_YELLOW;
+    else if (strcmp(event.type, "APPROACHING") == 0) color = TFT_ORANGE;
+
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.drawString(timeLabel, 6, y);
+    tft.setTextColor(color, TFT_BLACK);
+    tft.drawString(eventLabel, 50, y);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(callsign, 128, y);
+    tft.drawString(String(event.distanceNm, 1), 198, y);
+    tft.drawString(String(event.cpaNm, 1), 236, y);
+    tft.setTextColor(color, TFT_BLACK);
+    tft.drawString(threatLabel(event.threatLevel), 278, y);
+  }
+
+  if (!sdReady) {
+    tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+    tft.drawString("SD unavailable - event history disabled", 50, 112);
+  } else if (count == 0) {
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.drawString("No stored events yet", 102, 112);
+  }
+
+  drawInfoStrip(data);
+  if (!menuDrawnForScreen) {
+    drawTouchMenu(SCREEN_LIST);
+    menuDrawnForScreen = true;
+  }
+}
+
+void DisplayCYD::drawAircraftList(const SkywatchData &data) {
+  tft.fillRect(0, 0, SCREEN_WIDTH, TOUCH_BAR_Y, TFT_BLACK);
+  drawTopBar("SKYWATCH LIST", data);
+  drawListTabs();
+
+  if (listHistoryMode) {
+    drawEventHistory(data);
+    return;
+  }
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString("CALL", 6, 52);
+  tft.drawString("DIST", 70, 52);
+  tft.drawString("DIR", 108, 52);
+  tft.drawString("CPA", 142, 52);
+  tft.drawString("ETA", 182, 52);
+  tft.drawString("THR", 224, 52);
+  tft.drawString("ALT", 262, 52);
+  tft.drawLine(0, 65, SCREEN_WIDTH, 65, TFT_DARKGREEN);
 
   for (int i = 0; i < data.getPlaneCount(); i++) {
     const Plane &p = data.getPlane(i);
-    int y = 50 + i * 16;
+    int y = 72 + i * 15;
     if (y > TOUCH_BAR_Y - 24) break;
     uint16_t col = altitudeColor(p.altitudeFt);
     String call = p.callsign.length() ? p.callsign : p.icao;
@@ -907,7 +1020,7 @@ void DisplayCYD::drawAircraftList(const SkywatchData &data) {
 
   if (data.getPlaneCount() == 0) {
     tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft.drawString("No aircraft in range", 86, 110);
+    tft.drawString("No aircraft in range", 86, 120);
   }
 
   drawInfoStrip(data);
@@ -1033,7 +1146,7 @@ void DisplayCYD::drawSystemPage(const SkywatchData &data) {
   tft.drawString(String("CPA + Alerts: enabled   ") + BUILD_LABEL, 8, 195);
   tft.drawString("Home lat: " + String(data.getHomeLat(), 6), 8, 147);
   tft.drawString("Home lon: " + String(data.getHomeLon(), 6), 8, 164);
-  tft.drawString("Coords: " + String(data.coordsWereOverridden() ? "manual/web" : "IP lookup"), 168, 147);
+  tft.drawString("Coords: " + data.getHomeLocationSource(), 168, 147);
 
   unsigned long age = data.getLastPlaneUpdateMs() ? (millis() - data.getLastPlaneUpdateMs()) / 1000 : 0;
   tft.drawString("Data age: " + String(age) + " sec", 168, 164);

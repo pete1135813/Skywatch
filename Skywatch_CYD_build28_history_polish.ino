@@ -1,5 +1,5 @@
 /*
-   SKYWATCH v2.1 CYD Port — Build 27 Local ADS-B
+   SKYWATCH v2.1 CYD Port — Build 28 History + Polish
 
    Target:
    - ESP32 Cheap Yellow Display / ESP32-2432S028R style board
@@ -12,11 +12,11 @@
    - Web dashboard with /, /planes, /coords
    - Battery monitor
 
-   Build 27:
-   - Local readsb/tar1090 is the primary low-latency source
-   - Heap-safe filtered JSON streaming with position freshness checks
-   - OpenSky fallback and SD-configurable local receiver URL
-   - Build 26 SD memory, SPI ownership, and NTP behavior preserved
+   Build 28:
+   - Web-saved home coordinates persist in ESP32 NVS
+   - LIST page includes LIVE AIRCRAFT and SD-backed HISTORY tabs
+   - Event logs use wall-clock timestamps when NTP is available
+   - Build 27 local ADS-B, OpenSky fallback, and heap protections preserved
 */
 
 #include <WiFi.h>
@@ -87,7 +87,7 @@ void logPendingEvents() {
   for (int i = skywatch.getEventCount() - 1; i >= 0; i--) {
     const SkyEvent &e = skywatch.getEvent(i);
     if (!e.logged) {
-      storage.logEvent(skywatch.eventLogLine(i));
+      storage.logEvent(e);
       skywatch.markEventLogged(i);
     }
   }
@@ -115,6 +115,7 @@ void setup() {
 
   display.begin();
   storage.begin();
+  display.setStorage(&storage);
   display.setStorageStatus(storage.isReady(), storage.statusText());
   // Splash runs BEFORE radar sprite alloc so SD logo has full RAM and a quiet SPI bus.
   display.showSplash();
@@ -123,6 +124,9 @@ void setup() {
 
   skywatch.begin();
   storage.loadRuntimeConfig(skywatch);
+  // A web-saved manual location has highest priority and survives normal reboots
+  // and firmware uploads. If none exists, boot continues to IP geolocation.
+  skywatch.loadSavedHomeCoords();
   input.begin();
   display.showSystemCheck(skywatch);
   if (!display.splashLogoOk()) {
@@ -227,6 +231,7 @@ void loop() {
   }
 
   ScreenMode screen = input.currentScreen();
+  display.setListHistoryMode(input.listHistoryActive());
   bool screenChanged = (screen != lastScreen);
   unsigned long redrawInterval = (screen == SCREEN_RADAR) ? RADAR_REDRAW_INTERVAL_MS : PAGE_REDRAW_INTERVAL_MS;
 

@@ -4,6 +4,8 @@
 #include "SkywatchData.h"
 #include "config.h"
 
+class SkywatchStorage;
+
 enum ScreenMode {
   SCREEN_RADAR,
   SCREEN_LIST,
@@ -15,6 +17,8 @@ class DisplayCYD {
 public:
   void begin();
   void setStorageStatus(bool ready, const String &status);
+  void setStorage(SkywatchStorage *storage);
+  void setListHistoryMode(bool active);
   void showSplash();
   void showSystemCheck(const SkywatchData &data);
   void showConnectingScreen();
@@ -44,6 +48,10 @@ private:
   int fps = 0;
   bool sdReady = false;
   String sdStatus = "N/A";
+  SkywatchStorage *storage = nullptr;
+  bool listHistoryMode = false;
+  bool historyLoaded = false;
+  unsigned long lastHistoryLoadMs = 0;
 
   // Flicker control: chrome (status/menu/RFRSH) is not redrawn at radar FPS.
   ScreenMode lastScreen = SCREEN_SYSTEM; // force first paint as "changed"
@@ -64,6 +72,8 @@ private:
   void drawTopBar(const char *title, const SkywatchData &data);
   void drawInfoStrip(const SkywatchData &data);
   void drawTouchMenu(ScreenMode activeScreen);
+  void drawListTabs();
+  void drawEventHistory(const SkywatchData &data);
   void drawMenuButton(int index, const char *label, bool active);
   void drawLiveStatusPanel(const SkywatchData &data);
   void drawRefreshButton(bool active = false);

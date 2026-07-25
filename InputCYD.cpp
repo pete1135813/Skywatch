@@ -41,6 +41,10 @@ void InputCYD::setScreen(ScreenMode newScreen) {
   screen = newScreen;
 }
 
+bool InputCYD::listHistoryActive() const {
+  return historyActive;
+}
+
 bool InputCYD::consumeRefreshRequest() {
   if (!refreshRequested) return false;
   refreshRequested = false;
@@ -77,6 +81,15 @@ void InputCYD::handleTouch(int x, int y) {
   if (screen == SCREEN_RADAR && hitRefreshButton(x, y)) {
     refreshRequested = true;
     Serial.println(F("[Touch] RFRSH button"));
+    return;
+  }
+
+  if (screen == SCREEN_LIST &&
+      y >= LIST_TAB_Y && y < LIST_TAB_Y + LIST_TAB_H) {
+    historyActive = x >= SCREEN_WIDTH / 2;
+    Serial.println(historyActive
+        ? F("[Touch] LIST tab: HISTORY")
+        : F("[Touch] LIST tab: LIVE AIRCRAFT"));
     return;
   }
 

@@ -1,12 +1,21 @@
-SKYWATCH CYD - Build 27 Local ADS-B
+SKYWATCH CYD - Build 28 History + Polish
 
 Flash notes:
 - Board: ESP32 CYD / ESP32-2432S028R style board
 - Partition Scheme: Huge App
 - TFT_eSPI must be configured for your CYD display.
-- Open Skywatch_CYD_build27_local_adsb.ino.
+- Open Skywatch_CYD_build28_history_polish.ino.
 
-Build 27:
+Build 28:
+- Coordinates saved through the web dashboard persist across reboots.
+- Saved manual coordinates take priority over IP geolocation.
+- The dashboard can intentionally clear the saved location and return to IP lookup.
+- LIST contains LIVE AIRCRAFT and HISTORY touch tabs.
+- HISTORY reads a fixed SD tail buffer and never loads the full event log.
+- Event logs include wall-clock timestamps after NTP synchronization.
+- The event log rotates at 256 KB.
+
+Build 27 foundation preserved:
 - AUTO mode uses local readsb/tar1090 first and OpenSky as fallback.
 - Healthy local feeds update every 2 seconds.
 - Failed local connections back off for 30 seconds.

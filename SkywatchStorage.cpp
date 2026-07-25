@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <math.h>
 
+static StoredEvent EMPTY_STORED_EVENT;
+
 void SkywatchStorage::claimBus() const {
   cydClaimSdSpi();
 }
@@ -304,13 +306,158 @@ bool SkywatchStorage::loadRuntimeConfig(SkywatchData &data) {
   return applied;
 }
 
-void SkywatchStorage::logEvent(const String &line) {
+void SkywatchStorage::rotateEventLogIfNeeded() {
+  if (!ready || !SD.exists(SD_EVENT_LOG_PATH)) return;
+  File current = SD.open(SD_EVENT_LOG_PATH, FILE_READ);
+  if (!current) return;
+  size_t bytes = current.size();
+  current.close();
+  if (bytes < EVENT_LOG_MAX_BYTES) return;
+
+  if (SD.exists(SD_EVENT_ARCHIVE_PATH)) SD.remove(SD_EVENT_ARCHIVE_PATH);
+  if (SD.rename(SD_EVENT_LOG_PATH, SD_EVENT_ARCHIVE_PATH)) {
+    Serial.printf("[SD] Event log rotated at %u bytes\n", (unsigned)bytes);
+  }
+}
+
+void SkywatchStorage::logEvent(const SkyEvent &event) {
   if (!ready) return;
   claimBus();
+  rotateEventLogIfNeeded();
+
   File f = SD.open(SD_EVENT_LOG_PATH, FILE_APPEND);
   if (!f) return;
-  f.println(line);
+
+  String type = event.type;
+  String callsign = event.callsign;
+  type.replace("|", "/");
+  callsign.replace("|", "/");
+  type.trim();
+  callsign.trim();
+  if (type.length() == 0) type = "EVENT";
+  if (callsign.length() == 0) callsign = "UNKNOWN";
+
+  String ts = timestamp();
+  f.printf("%s|%s|%s|%.1f|%.1f|%d|%u\n",
+           ts.c_str(), type.c_str(), callsign.c_str(),
+           event.distanceNm, event.cpaNm, event.etaSec,
+           (unsigned)event.threatLevel);
   f.close();
+}
+
+bool SkywatchStorage::parseEventLine(char *line, StoredEvent &out) const {
+  out = StoredEvent();
+  if (!line || !line[0]) return false;
+
+  // Build 28 pipe-delimited format:
+  // timestamp|type|callsign|distance|cpa|eta|threat
+  if (strchr(line, '|')) {
+    char *save = nullptr;
+    char *fields[7] = {nullptr};
+    int count = 0;
+    for (char *token = strtok_r(line, "|", &save);
+         token && count < 7;
+         token = strtok_r(nullptr, "|", &save)) {
+      fields[count++] = token;
+    }
+    if (count != 7) return false;
+
+    strncpy(out.timestamp, fields[0], sizeof(out.timestamp) - 1);
+    strncpy(out.type, fields[1], sizeof(out.type) - 1);
+    strncpy(out.callsign, fields[2], sizeof(out.callsign) - 1);
+    out.distanceNm = atof(fields[3]);
+    out.cpaNm = atof(fields[4]);
+    out.etaSec = atoi(fields[5]);
+    out.threatLevel = (uint8_t)constrain(atoi(fields[6]), 0, 3);
+    out.valid = true;
+    return true;
+  }
+
+  // Backward-compatible Build 26/27 format:
+  // 317s NEW_TARGET VOI731 dist=12.5 cpa=6.4 eta=251 threat=1
+  unsigned threat = 0;
+  int matched = sscanf(line, "%23s %15s %15s dist=%f cpa=%f eta=%d threat=%u",
+                       out.timestamp, out.type, out.callsign,
+                       &out.distanceNm, &out.cpaNm, &out.etaSec, &threat);
+  if (matched != 7) return false;
+  out.threatLevel = (uint8_t)constrain((int)threat, 0, 3);
+  out.valid = true;
+  return true;
+}
+
+int SkywatchStorage::loadRecentEvents() {
+  historyCount = 0;
+  for (int i = 0; i < EVENT_HISTORY_MAX_ENTRIES; i++) history[i] = StoredEvent();
+  if (!ready) return 0;
+
+  claimBus();
+  File f = SD.open(SD_EVENT_LOG_PATH, FILE_READ);
+  if (!f) return 0;
+
+  const size_t fileSize = f.size();
+  const size_t start = fileSize > EVENT_HISTORY_TAIL_BYTES
+      ? fileSize - EVENT_HISTORY_TAIL_BYTES
+      : 0;
+  if (!f.seek(start)) {
+    f.close();
+    return 0;
+  }
+
+  // Fixed static buffer: no heap allocation and no full-file read.
+  static char tail[EVENT_HISTORY_TAIL_BYTES + 1];
+  size_t bytes = f.readBytes(tail, EVENT_HISTORY_TAIL_BYTES);
+  f.close();
+  tail[bytes] = '\0';
+
+  char *cursor = tail;
+  if (start > 0) {
+    // The tail may begin in the middle of a line; discard that partial record.
+    char *firstNewline = strchr(cursor, '\n');
+    if (!firstNewline) return 0;
+    cursor = firstNewline + 1;
+  }
+
+  StoredEvent chronological[EVENT_HISTORY_MAX_ENTRIES];
+  int chronologicalCount = 0;
+  char *lineSave = nullptr;
+  for (char *line = strtok_r(cursor, "\n", &lineSave);
+       line;
+       line = strtok_r(nullptr, "\n", &lineSave)) {
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == ' ')) {
+      line[--len] = '\0';
+    }
+
+    StoredEvent parsed;
+    if (!parseEventLine(line, parsed)) continue;
+
+    if (chronologicalCount < EVENT_HISTORY_MAX_ENTRIES) {
+      chronological[chronologicalCount++] = parsed;
+    } else {
+      for (int i = 1; i < EVENT_HISTORY_MAX_ENTRIES; i++) {
+        chronological[i - 1] = chronological[i];
+      }
+      chronological[EVENT_HISTORY_MAX_ENTRIES - 1] = parsed;
+    }
+  }
+
+  historyCount = chronologicalCount;
+  for (int i = 0; i < chronologicalCount; i++) {
+    history[i] = chronological[chronologicalCount - 1 - i];
+  }
+
+  Serial.printf("[SD] Loaded %d recent events from %u-byte tail\n",
+                historyCount, (unsigned)bytes);
+  return historyCount;
+}
+
+int SkywatchStorage::getHistoryCount() const {
+  return historyCount;
+}
+
+const StoredEvent& SkywatchStorage::getHistoryEvent(int index) const {
+  if (index < 0 || index >= historyCount) return EMPTY_STORED_EVENT;
+  return history[index];
 }
 
 bool SkywatchStorage::fileExists(const char *path) const {

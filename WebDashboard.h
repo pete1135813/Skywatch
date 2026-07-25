@@ -16,4 +16,5 @@ private:
   void handleRoot();
   void handlePlanes();
   void handleCoords();
+  void handleCoordsReset();
 };
