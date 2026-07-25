@@ -6,12 +6,26 @@
 #include "CydSpi.h"
 #include "SkywatchStorage.h"
 
+static uint32_t displayHashMix(uint32_t hash, uint32_t value) {
+  hash ^= value;
+  hash *= 16777619UL;
+  return hash;
+}
+
+static uint32_t displayHashString(uint32_t hash, const String &value) {
+  for (unsigned int i = 0; i < value.length(); i++) {
+    hash = displayHashMix(hash, (uint8_t)value.charAt(i));
+  }
+  return hash;
+}
+
 void DisplayCYD::begin() {
   tft.init();
   tft.setRotation(1); // CYD landscape: 320x240
   tft.fillScreen(TFT_BLACK);
   tft.setTextFont(1);
-  // Radar sprite is deferred until after splash so SD logo load has max RAM/SPI calm.
+  // Build 28.1 uses an incremental direct renderer. Keeping the sprite
+  // unallocated avoids full-frame pushes and leaves about 85 KB for TLS/JSON.
   radarSpriteReady = false;
   fpsWindowStart = millis();
   Serial.printf("[Display] TFT ready, free heap %u (sprite deferred for splash)\n",
@@ -19,28 +33,19 @@ void DisplayCYD::begin() {
 }
 
 void DisplayCYD::ensureRadarSprite() {
-  if (radarSpriteReady) return;
-  radarSprite.setColorDepth(16);
-  // Height stops above the info strip; width is left of the status column.
-  // RFRSH lives in the status column (x>=224) so the sprite cannot erase it.
-  radarSpriteReady = radarSprite.createSprite(STATUS_PANEL_X, TOUCH_BAR_Y - 16);
-  if (!radarSpriteReady) {
-    Serial.println(F("[Display] Radar sprite allocation failed; falling back to direct draw."));
-  } else {
-    Serial.printf("[Display] Radar sprite OK — free heap %u maxAlloc %u\n",
-                  ESP.getFreeHeap(), ESP.getMaxAllocHeap());
-  }
+  // Compatibility entry point retained for the network heap hooks.
+  // The incremental renderer intentionally does not allocate a frame sprite.
+  radarSpriteReady = false;
+  Serial.printf("[Display] Incremental radar active — free heap %u maxAlloc %u\n",
+                ESP.getFreeHeap(), ESP.getMaxAllocHeap());
 }
 
 void DisplayCYD::pauseHeavyBuffers() {
-  if (!radarSpriteReady) return;
-  radarSprite.deleteSprite();
-  radarSpriteReady = false;
-  Serial.printf("[Display] Sprite paused — free heap %u\n", ESP.getFreeHeap());
+  // No large display buffer is allocated by the incremental renderer.
 }
 
 void DisplayCYD::resumeHeavyBuffers() {
-  ensureRadarSprite();
+  // No large display buffer needs to be restored.
 }
 
 void DisplayCYD::setStorageStatus(bool ready, const String &status) {
@@ -58,6 +63,8 @@ void DisplayCYD::setListHistoryMode(bool active) {
   historyLoaded = false;
   lastHistoryLoadMs = 0;
   menuDrawnForScreen = false;
+  pageFullRedraw = true;
+  lastPageSignature = 0;
 }
 
 bool DisplayCYD::drawBmpFromSD(const char *filename, int16_t x, int16_t y) {
@@ -363,6 +370,58 @@ void DisplayCYD::paintScreen(ScreenMode screen, const SkywatchData &data, bool f
   }
 }
 
+uint32_t DisplayCYD::contentSignature(ScreenMode screen, const SkywatchData &data) const {
+  uint32_t hash = 2166136261UL;
+  hash = displayHashMix(hash, (uint32_t)screen);
+  hash = displayHashMix(hash, (uint32_t)data.getPlaneCount());
+  hash = displayHashMix(hash, (uint32_t)(data.getBatteryPercent() + 0.5f));
+
+  if (screen == SCREEN_LIST && listHistoryMode) {
+    // Poll the event file on the configured history cadence. The loader then
+    // supplies a more specific status for an empty or malformed file.
+    hash = displayHashMix(hash, millis() / EVENT_HISTORY_REFRESH_MS);
+    if (storage) {
+      hash = displayHashMix(hash, (uint32_t)storage->getHistoryCount());
+      hash = displayHashString(hash, storage->getHistoryStatus());
+    }
+    return hash;
+  }
+
+  if (screen == SCREEN_SYSTEM) {
+    hash = displayHashString(hash, data.getActiveSourceLabel());
+    hash = displayHashString(hash, data.getLocalStatus());
+    hash = displayHashString(hash, data.getOpenSkyModeLabel());
+    hash = displayHashString(hash, data.getLastApiStatus());
+    hash = displayHashString(hash, data.getHomeLocationSource());
+    hash = displayHashMix(hash, (uint32_t)data.getLastHttpCode());
+    hash = displayHashMix(hash, (uint32_t)data.getEventCount());
+    hash = displayHashMix(hash, (uint32_t)(data.getHomeLat() * 100000.0f));
+    hash = displayHashMix(hash, (uint32_t)(data.getHomeLon() * 100000.0f));
+    unsigned long age = data.getLastPlaneUpdateMs()
+        ? (millis() - data.getLastPlaneUpdateMs()) / 5000UL
+        : 0;
+    hash = displayHashMix(hash, age);
+    return hash;
+  }
+
+  // Radar, live list and traffic pages only repaint their aircraft layer when
+  // an actual displayed value changes, not on every scheduler tick.
+  for (int i = 0; i < data.getPlaneCount(); i++) {
+    const Plane &p = data.getPlane(i);
+    hash = displayHashString(hash, p.icao);
+    hash = displayHashString(hash, p.callsign);
+    hash = displayHashMix(hash, (uint32_t)(p.distanceNm * 10.0f));
+    hash = displayHashMix(hash, (uint32_t)(p.bearingDeg * 10.0f));
+    hash = displayHashMix(hash, (uint32_t)(p.headingDeg * 10.0f));
+    hash = displayHashMix(hash, (uint32_t)p.altitudeFt);
+    hash = displayHashMix(hash, (uint32_t)(p.cpaDistanceNm * 10.0f));
+    hash = displayHashMix(hash, (uint32_t)p.cpaEtaSec);
+    hash = displayHashMix(hash, (uint32_t)p.threatLevel);
+    hash = displayHashMix(hash, p.approaching ? 1U : 0U);
+  }
+  return hash;
+}
+
 void DisplayCYD::drawScreen(ScreenMode screen, const SkywatchData &data) {
   updateFps();
 
@@ -371,6 +430,10 @@ void DisplayCYD::drawScreen(ScreenMode screen, const SkywatchData &data) {
     lastScreen = screen;
     menuDrawnForScreen = false;
     lastChromeMs = 0; // force chrome on new page
+    pageFullRedraw = true;
+    lastPageSignature = 0;
+    radarBaseDrawn = false;
+    previousSweepAngle = -1.0f;
   }
 
 #if ENABLE_OBSERVER_ALERTS
@@ -380,7 +443,9 @@ void DisplayCYD::drawScreen(ScreenMode screen, const SkywatchData &data) {
     String key = e.type + "|" + e.callsign + "|" + String(e.createdMs);
     // Freeze the underlay while an alert is up — stops radar/status FPS flash through the popup.
     if (!alertFrozen || key != alertFreezeKey) {
+      pageFullRedraw = true;
       paintScreen(screen, data, true);
+      pageFullRedraw = false;
       drawAlertBanner(data);
       alertFrozen = true;
       alertFreezeKey = key;
@@ -394,12 +459,23 @@ void DisplayCYD::drawScreen(ScreenMode screen, const SkywatchData &data) {
     alertFreezeKey = "";
     lastChromeMs = 0;
     menuDrawnForScreen = false;
+    pageFullRedraw = true;
     paintScreen(screen, data, true);
+    pageFullRedraw = false;
     return;
   }
 #endif
 
+  if (screen != SCREEN_RADAR) {
+    const uint32_t signature = contentSignature(screen, data);
+    if (!screenChanged && !pageFullRedraw && signature == lastPageSignature) {
+      return;
+    }
+    lastPageSignature = signature;
+  }
+
   paintScreen(screen, data, screenChanged);
+  pageFullRedraw = false;
 }
 
 void DisplayCYD::drawTopBar(const char *title, const SkywatchData &data) {
@@ -464,24 +540,40 @@ void DisplayCYD::drawRadarChrome(const SkywatchData &data) {
 }
 
 void DisplayCYD::drawRadar(const SkywatchData &data, bool forceChrome) {
-  // Animated radar scope only — pushed as one sprite so the scope itself does not tear.
-  // Sprite covers x=0..STATUS_PANEL_X only. RFRSH + LIVE panel are to the right of that.
-  if (radarSpriteReady) {
-    renderRadarSprite(data);
-  } else {
-    // Fallback if the sprite cannot be allocated.
+  const uint32_t signature = contentSignature(SCREEN_RADAR, data);
+  const bool dataChanged = forceChrome || !radarBaseDrawn ||
+                           signature != lastRadarSignature;
+
+  if (dataChanged) {
+    // A changed traffic set needs one clean background repaint. Sweep-only
+    // frames below never clear the scope, which removes the visible flash.
     tft.fillRect(0, 0, STATUS_PANEL_X, TOUCH_BAR_Y - 16, TFT_BLACK);
-    drawTopBar("SKYWATCH RADAR", data);
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_CYAN);
+    tft.drawString("SKYWATCH RADAR", 6, 10);
     drawRadarGrid();
-    if (ENABLE_RADAR_SWEEP) drawRadarSweep();
+    if (ENABLE_MOTION_TRAILS) {
+      for (int i = 0; i < data.getPlaneCount(); i++) drawPlaneTrail(data.getPlane(i));
+    }
+    for (int i = 0; i < data.getPlaneCount(); i++) drawPlaneTarget(data.getPlane(i), i);
+    lastRadarSignature = signature;
+    radarBaseDrawn = true;
+    previousSweepAngle = -1.0f;
+  } else if (ENABLE_RADAR_SWEEP) {
+    // Erase only the two previous arms, then restore any grid/target pixels
+    // underneath. No full-scope clear or bitmap transfer occurs.
+    erasePreviousRadarSweep();
+    drawRadarGrid();
     if (ENABLE_MOTION_TRAILS) {
       for (int i = 0; i < data.getPlaneCount(); i++) drawPlaneTrail(data.getPlane(i));
     }
     for (int i = 0; i < data.getPlaneCount(); i++) drawPlaneTarget(data.getPlane(i), i);
   }
+  if (ENABLE_RADAR_SWEEP) drawRadarSweep();
 
   // Status / RFRSH / menu are NOT redrawn at radar FPS — keeps the right column steady.
-  // RFRSH is outside the sprite, so once drawn it is not erased by the sweep.
+  // RFRSH is outside the scope, so the sweep cannot erase it.
   const bool pending = data.getLastApiStatus().startsWith("Manual refresh");
   const bool pendingChanged = (pending != lastRefreshPending);
   const bool chromeDue = forceChrome || !menuDrawnForScreen ||
@@ -673,18 +765,32 @@ void DisplayCYD::drawRadarGrid() {
 
   tft.setTextDatum(MC_DATUM);
   tft.setTextSize(1);
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.setTextColor(TFT_GREEN);
   tft.drawString("N", RADAR_CENTER_X, RADAR_CENTER_Y - RADAR_RADIUS - 9);
   tft.drawString("S", RADAR_CENTER_X, RADAR_CENTER_Y + RADAR_RADIUS + 9);
   tft.drawString("W", RADAR_CENTER_X - RADAR_RADIUS - 10, RADAR_CENTER_Y);
   tft.drawString("E", RADAR_CENTER_X + RADAR_RADIUS + 10, RADAR_CENTER_Y);
 
   tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_DARKGREEN, TFT_BLACK);
+  tft.setTextColor(TFT_DARKGREEN);
   tft.drawString("5",  RADAR_CENTER_X + RADAR_RADIUS / 4 + 3, RADAR_CENTER_Y - 8);
   tft.drawString("10", RADAR_CENTER_X + RADAR_RADIUS / 2 + 3, RADAR_CENTER_Y - 8);
   tft.drawString("15", RADAR_CENTER_X + RADAR_RADIUS * 3 / 4 + 3, RADAR_CENTER_Y - 8);
   tft.drawString("20nm", RADAR_CENTER_X + RADAR_RADIUS - 20, RADAR_CENTER_Y - 8);
+}
+
+void DisplayCYD::erasePreviousRadarSweep() {
+  if (previousSweepAngle < 0.0f) return;
+
+  float a = previousSweepAngle * PI / 180.0f;
+  int x2 = RADAR_CENTER_X + (int)(RADAR_RADIUS * sin(a));
+  int y2 = RADAR_CENTER_Y - (int)(RADAR_RADIUS * cos(a));
+  tft.drawLine(RADAR_CENTER_X, RADAR_CENTER_Y, x2, y2, TFT_BLACK);
+
+  float a2 = (previousSweepAngle - 8.0f) * PI / 180.0f;
+  int x3 = RADAR_CENTER_X + (int)((RADAR_RADIUS - 4) * sin(a2));
+  int y3 = RADAR_CENTER_Y - (int)((RADAR_RADIUS - 4) * cos(a2));
+  tft.drawLine(RADAR_CENTER_X, RADAR_CENTER_Y, x3, y3, TFT_BLACK);
 }
 
 void DisplayCYD::drawRadarSweep() {
@@ -699,6 +805,7 @@ void DisplayCYD::drawRadarSweep() {
   int x3 = RADAR_CENTER_X + (int)((RADAR_RADIUS - 4) * sin(a2));
   int y3 = RADAR_CENTER_Y - (int)((RADAR_RADIUS - 4) * cos(a2));
   tft.drawLine(RADAR_CENTER_X, RADAR_CENTER_Y, x3, y3, TFT_DARKGREEN);
+  previousSweepAngle = angleDeg;
 }
 
 uint16_t DisplayCYD::altitudeColor(float altitudeFt) {
@@ -782,10 +889,10 @@ void DisplayCYD::drawPlaneTarget(const Plane &p, int index) {
 
   tft.setTextDatum(ML_DATUM);
   tft.setTextSize(1);
-  tft.setTextColor(col, TFT_BLACK);
+  tft.setTextColor(col);
   tft.drawString(label, labelX, labelY);
 
-  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.setTextColor(TFT_DARKGREY);
   tft.drawString(String((int)p.distanceNm) + "nm", labelX, labelY + 9);
 }
 
@@ -964,7 +1071,9 @@ void DisplayCYD::drawEventHistory(const SkywatchData &data) {
     tft.drawString("SD unavailable - event history disabled", 50, 112);
   } else if (count == 0) {
     tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft.drawString("No stored events yet", 102, 112);
+    String detail = storage ? storage->getHistoryStatus() : "Storage not connected";
+    if (detail.length() > 38) detail = detail.substring(0, 38);
+    tft.drawString(detail, 64, 112);
   }
 
   drawInfoStrip(data);
@@ -975,9 +1084,15 @@ void DisplayCYD::drawEventHistory(const SkywatchData &data) {
 }
 
 void DisplayCYD::drawAircraftList(const SkywatchData &data) {
-  tft.fillRect(0, 0, SCREEN_WIDTH, TOUCH_BAR_Y, TFT_BLACK);
-  drawTopBar("SKYWATCH LIST", data);
-  drawListTabs();
+  if (pageFullRedraw) {
+    tft.fillRect(0, 0, SCREEN_WIDTH, TOUCH_BAR_Y, TFT_BLACK);
+    drawTopBar("SKYWATCH LIST", data);
+    drawListTabs();
+  } else {
+    // Keep the title, tabs and menu steady; refresh only the table body.
+    tft.fillRect(0, 48, SCREEN_WIDTH, TOUCH_BAR_Y - 16 - 48, TFT_BLACK);
+    drawBatteryIndicator(data.getBatteryPercent());
+  }
 
   if (listHistoryMode) {
     drawEventHistory(data);
@@ -1031,8 +1146,14 @@ void DisplayCYD::drawAircraftList(const SkywatchData &data) {
 }
 
 void DisplayCYD::drawTrafficPage(const SkywatchData &data) {
-  tft.fillRect(0, 0, SCREEN_WIDTH, TOUCH_BAR_Y, TFT_BLACK);
-  drawTopBar("TRAFFIC / CPA", data);
+  if (pageFullRedraw) {
+    tft.fillRect(0, 0, SCREEN_WIDTH, TOUCH_BAR_Y, TFT_BLACK);
+    drawTopBar("TRAFFIC / CPA", data);
+  } else {
+    tft.fillRect(0, TOP_BAR_H, SCREEN_WIDTH,
+                 TOUCH_BAR_Y - 16 - TOP_BAR_H, TFT_BLACK);
+    drawBatteryIndicator(data.getBatteryPercent());
+  }
 
   int count = data.getPlaneCount();
   int order[MAX_PLANES];
@@ -1125,8 +1246,13 @@ void DisplayCYD::drawTrafficPage(const SkywatchData &data) {
 }
 
 void DisplayCYD::drawSystemPage(const SkywatchData &data) {
-  tft.fillRect(0, 0, SCREEN_WIDTH, TOUCH_BAR_Y, TFT_BLACK);
-  drawTopBar("SYSTEM STATUS", data);
+  if (pageFullRedraw) {
+    tft.fillRect(0, 0, SCREEN_WIDTH, TOUCH_BAR_Y, TFT_BLACK);
+    drawTopBar("SYSTEM STATUS", data);
+  } else {
+    tft.fillRect(0, TOP_BAR_H, SCREEN_WIDTH, TOUCH_BAR_Y - TOP_BAR_H, TFT_BLACK);
+    drawBatteryIndicator(data.getBatteryPercent());
+  }
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
@@ -1142,7 +1268,7 @@ void DisplayCYD::drawSystemPage(const SkywatchData &data) {
   tft.drawString("SD: " + sdStatus + "  Events: " + String(data.getEventCount()), 8, 181);
   tft.drawString("FPS: " + String(fps) + "  RAM: " + String((int)(ESP.getFreeHeap() / 1024)) + "k", 168, 113);
   tft.drawString("Trails: " + String(ENABLE_MOTION_TRAILS ? "enabled" : "off") + "  points " + String(TRAIL_POINTS), 8, 130);
-  tft.drawString("Sweep: " + String(ENABLE_RADAR_SWEEP ? "enabled" : "off"), 168, 130);
+  tft.drawString("Radar: incremental", 168, 130);
   tft.drawString(String("CPA + Alerts: enabled   ") + BUILD_LABEL, 8, 195);
   tft.drawString("Home lat: " + String(data.getHomeLat(), 6), 8, 147);
   tft.drawString("Home lon: " + String(data.getHomeLon(), 6), 8, 164);
