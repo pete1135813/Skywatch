@@ -1,10 +1,10 @@
-# Skywatch — Build 27 (Local ADS-B)
+# Skywatch — Build 28 (History + Polish)
 
 Portable aircraft radar for the **ESP32 Cheap Yellow Display (CYD)** / ESP32-2432S028R style boards.
 
 Skywatch shows nearby aircraft on a 320×240 landscape TFT, with touch navigation, low-latency local ADS-B, automatic OpenSky network fallback, demo traffic, a captive WiFi setup portal, a simple web dashboard, SD-card event logging, and persistent aircraft “memory” profiles.
 
-> **Current release:** Build 27 — Local ADS-B  
+> **Current development build:** Build 28 — History + Polish  
 > Board: ESP32-2432S028R (CYD) · Display: 320×240 via TFT_eSPI
 
 ---
@@ -17,12 +17,13 @@ Skywatch shows nearby aircraft on a 320×240 landscape TFT, with touch navigatio
   - Local ADS-B (readsb / tar1090 / dump1090) — primary, approximately 2-second updates
   - OpenSky Network — automatic fallback, HTTPS and rate-limit aware
   - Demo traffic fallback when no live source is available
-- **IP geolocation** for home lat/lon after WiFi (with retry + fallback provider); manual override via web `/coords`
+- **Persistent location:** dashboard coordinates are saved in ESP32 NVS; IP geolocation is fallback only
 - **Observer alerts:** NEW_TARGET / APPROACHING / THREAT_UP popup overlays (stable underlay while shown)
-- **SD card:** boot self-test, folder layout, splash logo, event log, aircraft profiles, daily stats
+- **On-device event history:** LIST page tabs switch between live aircraft and recent SD events
+- **SD card:** boot self-test, folder layout, splash logo, rotating event log, aircraft profiles, daily stats
 - **NTP** wall-clock timestamps for SD logs (configurable timezone)
 - **WiFiManager** captive portal (`Skywatch` AP)
-- **Web dashboard:** `/`, `/planes`, `/coords`
+- **Web dashboard:** `/`, `/planes`, `/coords`, `/coords/reset`
 - **SPI bus ownership** (`CydSpi.h`) so SD + touch share VSPI safely
 - **Heap-safe networking:** filtered streaming for local readsb JSON; radar sprite paused during OpenSky TLS and IP geo HTTP
 - **Runtime receiver configuration:** local ADS-B URL can be changed on the SD card without recompiling
@@ -44,7 +45,7 @@ Skywatch shows nearby aircraft on a 320×240 landscape TFT, with touch navigatio
 ## Flash (Arduino IDE)
 
 1. Libraries: **TFT_eSPI**, **WiFiManager**, **XPT2046_Touchscreen**, **ArduinoJson**
-2. Open `Skywatch_CYD_build27_local_adsb.ino`
+2. Open `Skywatch_CYD_build28_history_polish.ino`
 3. Board: your ESP32 CYD profile · **Partition Scheme: Huge App**
 4. Copy `sd_card_files/` to the microSD and set `LocalADSBURL` in `/config/settings.txt`
 5. Upload
@@ -104,7 +105,7 @@ If the logo is missing or invalid, a vector splash is used instead.
 
 ```
 .
-├── Skywatch_CYD_build27_local_adsb.ino
+├── Skywatch_CYD_build28_history_polish.ino
 ├── config.h
 ├── CydSpi.h                 # SD / touch VSPI ownership
 ├── SkywatchData.*           # traffic sources, alerts, OpenSky, IP geo
@@ -118,18 +119,37 @@ If the logo is missing or invalid, a vector splash is used instead.
 
 ---
 
-## Build 27 notes
+## Build 28 notes
 
-- Local readsb/tar1090 is enabled by default in `AUTO` mode
-- The tested workshop endpoint is supplied through SD `settings.txt`
-- Local JSON is filtered and parsed directly from the HTTP stream; the complete
-  response is never duplicated into a large `String`
-- `seen_pos` rejects stale coordinates before they reach the radar
-- Local success uses a 2-second cadence; failure uses a 30-second backoff
-- OpenSky is allowed immediately at boot or after local failure, then follows its
-  configured rate-safe interval
-- Build 26 aircraft memory, SD logging, splash, touch, and heap-safe TLS behavior
-  remain intact
+- Manual latitude/longitude entered on the web dashboard are saved in ESP32 NVS
+  and restored before IP geolocation runs
+- `Use IP location` clears the saved override explicitly; ISP geolocation is never
+  allowed to overwrite a saved manual position at boot
+- The LIST page now contains `LIVE AIRCRAFT` and `HISTORY` touch tabs
+- New event records include the NTP wall-clock time when available
+- History reads only the final 3072 bytes of the log and retains 20 fixed-size
+  parsed entries; it never loads the complete event file into heap memory
+- Existing Build 26/27 event lines remain readable
+- The active event log rotates at 256 KB to bound SD scan and storage growth
+- Build 27 local ADS-B, OpenSky fallback, aircraft awareness, SD memory, splash,
+  touch navigation, and heap protections remain intact
+
+### Location behavior
+
+The boot priority is:
+
+1. A manual location previously saved through the web dashboard
+2. IP geolocation when no saved location exists
+
+The SYSTEM page and web dashboard show the active location source. Normal firmware
+uploads preserve the saved NVS coordinates; erasing the full ESP32 flash clears them.
+
+### Event history
+
+Tap `LIST`, then choose `HISTORY`. Skywatch displays the newest stored events first
+with time, event type, callsign, distance, CPA, and threat level. The page refreshes
+from the SD tail every five seconds while visible. Event types include
+`NEW_TARGET`, `APPROACHING`, and `THREAT_UP`.
 
 ## License / ownership
 

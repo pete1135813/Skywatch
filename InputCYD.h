@@ -14,6 +14,7 @@ public:
   void update();
   ScreenMode currentScreen() const;
   void setScreen(ScreenMode screen);
+  bool listHistoryActive() const;
 
   // True once after the radar RFRSH button is tapped; clears on read.
   bool consumeRefreshRequest();
@@ -23,9 +24,9 @@ private:
   unsigned long lastAutoCycle = 0;
   unsigned long lastTouchMs = 0;
   bool refreshRequested = false;
+  bool historyActive = false;
 
 #if ENABLE_TOUCH_NAV
-  SPIClass touchSPI = SPIClass(VSPI);
   XPT2046_Touchscreen touch = XPT2046_Touchscreen(TOUCH_CS, TOUCH_IRQ);
   bool readTouch(int &x, int &y);
   void handleTouch(int x, int y);

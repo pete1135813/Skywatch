@@ -13,6 +13,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     input { background:#111; color:#0f0; border:1px solid #0f0; padding:4px; margin:2px; }
     button { background:#0f0; color:#000; border:none; padding:5px 10px; cursor:pointer; }
     button:hover { background:#9f9; }
+    .secondary { background:#222; color:#0f0; border:1px solid #0f0; }
   </style>
 </head>
 <body>
@@ -21,10 +22,12 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
   <div class="coord-box">
     <div>Current: <span id="currentCoords">lat=0, lon=0</span></div>
+    <div>Source: <span id="coordSource">unknown</span></div>
     <div style="margin-top:6px;">
       New lat: <input id="lat" size="8" />
       New lon: <input id="lon" size="8" />
-      <button onclick="updateCoords()">Update</button>
+      <button onclick="updateCoords()">Save location</button>
+      <button class="secondary" onclick="resetCoords()">Use IP location</button>
     </div>
   </div>
 
@@ -65,6 +68,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         drawRadarBackground();
         document.getElementById('currentCoords').textContent =
           `lat=${data.homeLat.toFixed(4)}, lon=${data.homeLon.toFixed(4)}`;
+        document.getElementById('coordSource').textContent = data.coordSource;
 
         for (const p of data.planes) {
           const bearing = p.bearingDeg * Math.PI / 180.0;
@@ -89,10 +93,18 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       const lat = parseFloat(document.getElementById('lat').value);
       const lon = parseFloat(document.getElementById('lon').value);
       if (isNaN(lat) || isNaN(lon)) { alert('Invalid lat/lon'); return; }
-      await fetch('/coords', {
+      const res = await fetch('/coords', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({lat, lon})
       });
+      if (!res.ok) { alert(await res.text()); return; }
+      fetchPlanes();
+    }
+
+    async function resetCoords() {
+      if (!confirm('Clear the saved location and use IP geolocation?')) return;
+      const res = await fetch('/coords/reset', {method: 'POST'});
+      if (!res.ok) { alert(await res.text()); return; }
       fetchPlanes();
     }
 
@@ -109,6 +121,7 @@ void WebDashboard::begin(SkywatchData *data) {
   server.on("/", HTTP_GET, [this]() { handleRoot(); });
   server.on("/planes", HTTP_GET, [this]() { handlePlanes(); });
   server.on("/coords", HTTP_POST, [this]() { handleCoords(); });
+  server.on("/coords/reset", HTTP_POST, [this]() { handleCoordsReset(); });
   server.begin();
   Serial.println("[Server] HTTP server started.");
 }
@@ -130,6 +143,7 @@ void WebDashboard::handlePlanes() {
   DynamicJsonDocument doc(2048 + MAX_PLANES * 128);
   doc["homeLat"] = skywatch->getHomeLat();
   doc["homeLon"] = skywatch->getHomeLon();
+  doc["coordSource"] = skywatch->getHomeLocationSource();
 
   JsonArray arr = doc.createNestedArray("planes");
   for (int i = 0; i < skywatch->getPlaneCount(); i++) {
@@ -166,10 +180,39 @@ void WebDashboard::handleCoords() {
     return;
   }
 
-  float lat = doc["lat"] | skywatch->getHomeLat();
-  float lon = doc["lon"] | skywatch->getHomeLon();
-  skywatch->setHomeCoords(lat, lon, true);
+  if (!doc["lat"].is<float>() && !doc["lat"].is<double>() && !doc["lat"].is<int>()) {
+    server.send(400, "text/plain", "Missing numeric latitude");
+    return;
+  }
+  if (!doc["lon"].is<float>() && !doc["lon"].is<double>() && !doc["lon"].is<int>()) {
+    server.send(400, "text/plain", "Missing numeric longitude");
+    return;
+  }
 
-  Serial.printf("[Coords] Overridden to lat=%.6f lon=%.6f\n", lat, lon);
-  server.send(200, "text/plain", "OK");
+  float lat = doc["lat"].as<float>();
+  float lon = doc["lon"].as<float>();
+  if (lat < -90.0f || lat > 90.0f || lon < -180.0f || lon > 180.0f) {
+    server.send(400, "text/plain", "Latitude or longitude is out of range");
+    return;
+  }
+  if (!skywatch->saveHomeCoords(lat, lon)) {
+    server.send(500, "text/plain", "Could not save coordinates");
+    return;
+  }
+
+  server.send(200, "text/plain", "Saved");
+}
+
+void WebDashboard::handleCoordsReset() {
+  if (!skywatch) {
+    server.send(500, "text/plain", "skywatch null");
+    return;
+  }
+  if (!skywatch->clearSavedHomeCoords()) {
+    server.send(500, "text/plain", "Could not clear saved coordinates");
+    return;
+  }
+
+  skywatch->fetchHomeLocationFromIP();
+  server.send(200, "text/plain", "Using IP location");
 }

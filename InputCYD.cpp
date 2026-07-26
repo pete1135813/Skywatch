@@ -6,8 +6,10 @@ void InputCYD::begin() {
   refreshRequested = false;
 
 #if ENABLE_TOUCH_NAV
-  cydClaimTouchSpi(touchSPI);
-  touch.begin(touchSPI);
+  // Touch and SD share the one global VSPI object. CydSpi.h performs an
+  // explicit pin handoff before either device accesses the peripheral.
+  cydClaimTouchSpi(SPI);
+  touch.begin(SPI);
   touch.setRotation(1);
 #endif
 }
@@ -41,6 +43,10 @@ void InputCYD::setScreen(ScreenMode newScreen) {
   screen = newScreen;
 }
 
+bool InputCYD::listHistoryActive() const {
+  return historyActive;
+}
+
 bool InputCYD::consumeRefreshRequest() {
   if (!refreshRequested) return false;
   refreshRequested = false;
@@ -55,7 +61,7 @@ bool InputCYD::hitRefreshButton(int x, int y) {
 
 bool InputCYD::readTouch(int &x, int &y) {
   // Reclaim VSPI for touch pins if SD just used the bus.
-  cydClaimTouchSpi(touchSPI);
+  cydClaimTouchSpi(SPI);
 
   if (!touch.touched()) return false;
   if (millis() - lastTouchMs < 250) return false; // debounce
@@ -77,6 +83,15 @@ void InputCYD::handleTouch(int x, int y) {
   if (screen == SCREEN_RADAR && hitRefreshButton(x, y)) {
     refreshRequested = true;
     Serial.println(F("[Touch] RFRSH button"));
+    return;
+  }
+
+  if (screen == SCREEN_LIST &&
+      y >= LIST_TAB_Y && y < LIST_TAB_Y + LIST_TAB_H) {
+    historyActive = x >= SCREEN_WIDTH / 2;
+    Serial.println(historyActive
+        ? F("[Touch] LIST tab: HISTORY")
+        : F("[Touch] LIST tab: LIVE AIRCRAFT"));
     return;
   }
 

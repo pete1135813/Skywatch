@@ -1,4 +1,4 @@
-# Skywatch Build 27 runtime settings
+# Skywatch Build 28 runtime settings
 # Change this address to the PC or receiver serving readsb/tar1090.
 LocalADSBURL=http://192.168.1.64:8080/tar1090/data/aircraft.json
 
@@ -10,5 +10,5 @@ Sweep=ON
 Alerts=ON
 Brightness=80
 
-Build=27
+Build=28
 Memory=ON

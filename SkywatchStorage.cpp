@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <math.h>
 
+static StoredEvent EMPTY_STORED_EVENT;
+
 void SkywatchStorage::claimBus() const {
   cydClaimSdSpi();
 }
@@ -258,10 +260,14 @@ bool SkywatchStorage::ensureFolders() {
   if (!ready) return false;
   claimBus();
   const char *dirs[] = {"/events", "/tracks", "/planes", "/stats", "/config", "/logos"};
+  bool allReady = true;
   for (uint8_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
-    if (!SD.exists(dirs[i])) SD.mkdir(dirs[i]);
+    if (!SD.exists(dirs[i]) && !SD.mkdir(dirs[i])) {
+      allReady = false;
+      Serial.printf("[SD] Folder create failed: %s\n", dirs[i]);
+    }
   }
-  return true;
+  return allReady;
 }
 
 bool SkywatchStorage::loadRuntimeConfig(SkywatchData &data) {
@@ -304,13 +310,307 @@ bool SkywatchStorage::loadRuntimeConfig(SkywatchData &data) {
   return applied;
 }
 
-void SkywatchStorage::logEvent(const String &line) {
-  if (!ready) return;
+void SkywatchStorage::rotateEventLogIfNeeded() {
+  if (!ready || !SD.exists(SD_EVENT_LOG_PATH)) return;
+  File current = SD.open(SD_EVENT_LOG_PATH, FILE_READ);
+  if (!current) return;
+  size_t bytes = current.size();
+  current.close();
+  if (bytes < EVENT_LOG_MAX_BYTES) return;
+
+  if (SD.exists(SD_EVENT_ARCHIVE_PATH)) SD.remove(SD_EVENT_ARCHIVE_PATH);
+  if (SD.rename(SD_EVENT_LOG_PATH, SD_EVENT_ARCHIVE_PATH)) {
+    Serial.printf("[SD] Event log rotated at %u bytes\n", (unsigned)bytes);
+  }
+}
+
+bool SkywatchStorage::ensureEventLogPath() {
+  File eventsDir = SD.open("/events", FILE_READ);
+  if (eventsDir) {
+    bool isDirectory = eventsDir.isDirectory();
+    eventsDir.close();
+    if (!isDirectory) {
+      scheduleEventLogRetry("/events exists but is not a folder");
+      return false;
+    }
+    return true;
+  }
+
+  if (!SD.mkdir("/events")) {
+    scheduleEventLogRetry("could not create /events folder");
+    return false;
+  }
+
+  eventsDir = SD.open("/events", FILE_READ);
+  bool created = eventsDir && eventsDir.isDirectory();
+  if (eventsDir) eventsDir.close();
+  if (!created) {
+    scheduleEventLogRetry("/events folder verification failed");
+    return false;
+  }
+
+  Serial.println(F("[SD] Recreated missing /events folder"));
+  return true;
+}
+
+void SkywatchStorage::scheduleEventLogRetry(const char *reason) {
+  if (eventLogFailureCount < 6) eventLogFailureCount++;
+
+  // 5s, 10s, 20s, then 30s. One failing SD path must never monopolize loop().
+  uint8_t shift = min((int)eventLogFailureCount - 1, 3);
+  unsigned long retryDelayMs = 5000UL << shift;
+  if (retryDelayMs > 30000UL) retryDelayMs = 30000UL;
+  eventLogRetryAfterMs = millis() + retryDelayMs;
+
+  historyStatus = String(reason) + " - retry " + String(retryDelayMs / 1000UL) + "s";
+  Serial.printf("[SD] Event logger paused: %s; retry in %lus\n",
+                reason, retryDelayMs / 1000UL);
+}
+
+File SkywatchStorage::openEventLogForAppend() {
   claimBus();
+  if (!ensureEventLogPath()) return File();
+  rotateEventLogIfNeeded();
+
+  bool fileExisted = SD.exists(SD_EVENT_LOG_PATH);
   File f = SD.open(SD_EVENT_LOG_PATH, FILE_APPEND);
-  if (!f) return;
-  f.println(line);
+  if (!f && !fileExisted) {
+    // Some SD/FAT combinations do not create a new file in append mode.
+    // Create it once with write mode, then reopen without risking truncation.
+    File created = SD.open(SD_EVENT_LOG_PATH, FILE_WRITE);
+    if (created) {
+      created.close();
+      f = SD.open(SD_EVENT_LOG_PATH, FILE_APPEND);
+      if (f) Serial.println(F("[SD] Created missing event log file"));
+    }
+  }
+  if (!f) scheduleEventLogRetry("event log open failed");
+  return f;
+}
+
+bool SkywatchStorage::prepareEventLog() {
+  if (!ready) return false;
+
+  // This is intentionally called after touch initialization. It proves that
+  // VSPI can hand control back to SD before the main loop starts.
+  eventLogRetryAfterMs = 0;
+  File f = openEventLogForAppend();
+  if (!f) return false;
   f.close();
+
+  eventLogFailureCount = 0;
+  eventLogRetryAfterMs = 0;
+  historyStatus = "Event log ready";
+  Serial.println(F("[SD] Event log write access OK after touch init"));
+  return true;
+}
+
+bool SkywatchStorage::logEvent(const SkyEvent &event) {
+  if (!ready) {
+    historyStatus = "SD unavailable";
+    Serial.println(F("[SD] Event log skipped: storage not ready"));
+    return false;
+  }
+
+  // Signed subtraction keeps this comparison safe across millis() rollover.
+  if (eventLogRetryAfterMs != 0 &&
+      (int32_t)(millis() - eventLogRetryAfterMs) < 0) {
+    return false;
+  }
+
+  File f = openEventLogForAppend();
+  if (!f) return false;
+
+  String type = event.type;
+  String callsign = event.callsign;
+  type.replace("|", "/");
+  callsign.replace("|", "/");
+  type.trim();
+  callsign.trim();
+  if (type.length() == 0) type = "EVENT";
+  if (callsign.length() == 0) callsign = "UNKNOWN";
+
+  String ts = timestamp();
+  size_t written = f.printf("%s|%s|%s|%.1f|%.1f|%d|%u\n",
+                            ts.c_str(), type.c_str(), callsign.c_str(),
+                            event.distanceNm, event.cpaNm, event.etaSec,
+                            (unsigned)event.threatLevel);
+  f.flush();
+  size_t fileSize = f.size();
+  f.close();
+
+  if (written == 0) {
+    scheduleEventLogRetry("event log write failed");
+    return false;
+  }
+
+  if (eventLogFailureCount > 0) {
+    Serial.println(F("[SD] Event logger recovered"));
+  }
+  eventLogFailureCount = 0;
+  eventLogRetryAfterMs = 0;
+  historyStatus = "New event saved";
+  Serial.printf("[SD] Event logged: %s %s (%u bytes, file %u bytes)\n",
+                type.c_str(), callsign.c_str(), (unsigned)written,
+                (unsigned)fileSize);
+  return true;
+}
+
+bool SkywatchStorage::parseEventLine(char *line, StoredEvent &out) const {
+  out = StoredEvent();
+  if (!line || !line[0]) return false;
+
+  // Build 28 pipe-delimited format:
+  // timestamp|type|callsign|distance|cpa|eta|threat
+  if (strchr(line, '|')) {
+    char *save = nullptr;
+    char *fields[7] = {nullptr};
+    int count = 0;
+    for (char *token = strtok_r(line, "|", &save);
+         token && count < 7;
+         token = strtok_r(nullptr, "|", &save)) {
+      fields[count++] = token;
+    }
+    if (count != 7) return false;
+
+    strncpy(out.timestamp, fields[0], sizeof(out.timestamp) - 1);
+    strncpy(out.type, fields[1], sizeof(out.type) - 1);
+    strncpy(out.callsign, fields[2], sizeof(out.callsign) - 1);
+    out.distanceNm = atof(fields[3]);
+    out.cpaNm = atof(fields[4]);
+    out.etaSec = atoi(fields[5]);
+    out.threatLevel = (uint8_t)constrain(atoi(fields[6]), 0, 3);
+    out.valid = true;
+    return true;
+  }
+
+  // Backward-compatible Build 26/27 format:
+  // 317s NEW_TARGET VOI731 dist=12.5 cpa=6.4 eta=251 threat=1
+  unsigned threat = 0;
+  int matched = sscanf(line, "%23s %15s %15s dist=%f cpa=%f eta=%d threat=%u",
+                       out.timestamp, out.type, out.callsign,
+                       &out.distanceNm, &out.cpaNm, &out.etaSec, &threat);
+  if (matched != 7) return false;
+  out.threatLevel = (uint8_t)constrain((int)threat, 0, 3);
+  out.valid = true;
+  return true;
+}
+
+int SkywatchStorage::loadRecentEvents() {
+  historyCount = 0;
+  for (int i = 0; i < EVENT_HISTORY_MAX_ENTRIES; i++) history[i] = StoredEvent();
+  if (!ready) {
+    historyStatus = "SD unavailable";
+    Serial.println(F("[SD] History load skipped: storage not ready"));
+    return 0;
+  }
+
+  claimBus();
+  File f = SD.open(SD_EVENT_LOG_PATH, FILE_READ);
+  if (!f) {
+    historyStatus = "No event log file";
+    Serial.printf("[SD] History file not found/openable: %s\n", SD_EVENT_LOG_PATH);
+    return 0;
+  }
+
+  const size_t fileSize = f.size();
+  if (fileSize == 0) {
+    f.close();
+    historyStatus = "Event log is empty";
+    Serial.printf("[SD] History file is empty: %s\n", SD_EVENT_LOG_PATH);
+    return 0;
+  }
+  const size_t start = fileSize > EVENT_HISTORY_TAIL_BYTES
+      ? fileSize - EVENT_HISTORY_TAIL_BYTES
+      : 0;
+  if (!f.seek(start)) {
+    f.close();
+    historyStatus = "Event log seek failed";
+    Serial.printf("[SD] History seek failed: %s offset %u\n",
+                  SD_EVENT_LOG_PATH, (unsigned)start);
+    return 0;
+  }
+
+  // Fixed static buffer: no heap allocation and no full-file read.
+  static char tail[EVENT_HISTORY_TAIL_BYTES + 1];
+  size_t bytes = f.readBytes(tail, EVENT_HISTORY_TAIL_BYTES);
+  f.close();
+  tail[bytes] = '\0';
+
+  char *cursor = tail;
+  if (start > 0) {
+    // The tail may begin in the middle of a line; discard that partial record.
+    char *firstNewline = strchr(cursor, '\n');
+    if (!firstNewline) {
+      historyStatus = "No complete history rows";
+      Serial.printf("[SD] History tail has no complete line (%u bytes)\n",
+                    (unsigned)bytes);
+      return 0;
+    }
+    cursor = firstNewline + 1;
+  }
+
+  StoredEvent chronological[EVENT_HISTORY_MAX_ENTRIES];
+  int chronologicalCount = 0;
+  int lineCount = 0;
+  int rejectedCount = 0;
+  char *lineSave = nullptr;
+  for (char *line = strtok_r(cursor, "\n", &lineSave);
+       line;
+       line = strtok_r(nullptr, "\n", &lineSave)) {
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == ' ')) {
+      line[--len] = '\0';
+    }
+
+    lineCount++;
+    StoredEvent parsed;
+    if (!parseEventLine(line, parsed)) {
+      rejectedCount++;
+      continue;
+    }
+
+    if (chronologicalCount < EVENT_HISTORY_MAX_ENTRIES) {
+      chronological[chronologicalCount++] = parsed;
+    } else {
+      for (int i = 1; i < EVENT_HISTORY_MAX_ENTRIES; i++) {
+        chronological[i - 1] = chronological[i];
+      }
+      chronological[EVENT_HISTORY_MAX_ENTRIES - 1] = parsed;
+    }
+  }
+
+  historyCount = chronologicalCount;
+  for (int i = 0; i < chronologicalCount; i++) {
+    history[i] = chronological[chronologicalCount - 1 - i];
+  }
+
+  if (historyCount > 0) {
+    historyStatus = String(historyCount) + " event" +
+                    (historyCount == 1 ? "" : "s") + " loaded";
+  } else if (lineCount == 0) {
+    historyStatus = "Event log has no rows";
+  } else {
+    historyStatus = String("0 parsed / ") + lineCount + " rows";
+  }
+
+  Serial.printf("[SD] History: file=%u tail=%u lines=%d loaded=%d rejected=%d\n",
+                (unsigned)fileSize, (unsigned)bytes, lineCount,
+                historyCount, rejectedCount);
+  return historyCount;
+}
+
+int SkywatchStorage::getHistoryCount() const {
+  return historyCount;
+}
+
+String SkywatchStorage::getHistoryStatus() const {
+  return historyStatus;
+}
+
+const StoredEvent& SkywatchStorage::getHistoryEvent(int index) const {
+  if (index < 0 || index >= historyCount) return EMPTY_STORED_EVENT;
+  return history[index];
 }
 
 bool SkywatchStorage::fileExists(const char *path) const {

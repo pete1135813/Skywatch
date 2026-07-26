@@ -7,7 +7,7 @@
 
 #include <Arduino.h>
 
-static const char BUILD_LABEL[] = "Build 27 Local ADS-B";
+static const char BUILD_LABEL[] = "Build 28 History + Polish";
 
 // ---------------------- DISPLAY ----------------------
 static const int SCREEN_WIDTH  = 320;
@@ -104,6 +104,9 @@ static const unsigned long BATTERY_UPDATE_INTERVAL_MS = 10000;
 // ---------------------- UI ----------------------
 static const bool AUTO_CYCLE_SCREENS = false;
 static const unsigned long AUTO_CYCLE_INTERVAL_MS = 8000;
+static const int LIST_TAB_Y = TOP_BAR_H + 2;
+static const int LIST_TAB_H = 22;
+static const unsigned long EVENT_HISTORY_REFRESH_MS = 5000;
 
 // Manual traffic refresh button — MUST sit outside the radar sprite footprint
 // (sprite is x=0..STATUS_PANEL_X-1). Right-hand status column stays steady.
@@ -126,7 +129,11 @@ static const uint32_t SD_SPI_HZ = 10000000;
 static const char SD_LOGO_PATH[] = "/logos/skywatch_logo.bmp";
 static const char SD_LOGO_PATH_ALT[] = "/skywatch_logo.bmp";
 static const char SD_EVENT_LOG_PATH[] = "/events/events.txt";
+static const char SD_EVENT_ARCHIVE_PATH[] = "/events/events.previous.txt";
 static const char SD_SETTINGS_PATH[] = "/config/settings.txt";
+static const int EVENT_HISTORY_MAX_ENTRIES = 20;
+static const size_t EVENT_HISTORY_TAIL_BYTES = 3072;
+static const size_t EVENT_LOG_MAX_BYTES = 256 * 1024;
 // Splash BMP color fixes (24-bit BMP is BGR on disk; CYD/TFT_eSPI often needs tweaks):
 //   SWAP_BYTES — required for most TFT_eSPI pushImage RGB565 buffers (try this first)
 //   INVERT     — photographic negative look (black<->white); set 0 if only hues were wrong

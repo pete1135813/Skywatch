@@ -4,7 +4,19 @@
 #include "config.h"
 
 struct Plane;
+struct SkyEvent;
 class SkywatchData;
+
+struct StoredEvent {
+  char timestamp[24] = {0};
+  char type[16] = {0};
+  char callsign[16] = {0};
+  float distanceNm = 0;
+  float cpaNm = 0;
+  int etaSec = -1;
+  uint8_t threatLevel = 0;
+  bool valid = false;
+};
 
 class SkywatchStorage {
 public:
@@ -13,7 +25,12 @@ public:
   String statusText() const;
   bool ensureFolders();
   bool loadRuntimeConfig(SkywatchData &data);
-  void logEvent(const String &line);
+  bool prepareEventLog();
+  bool logEvent(const SkyEvent &event);
+  int loadRecentEvents();
+  int getHistoryCount() const;
+  const StoredEvent& getHistoryEvent(int index) const;
+  String getHistoryStatus() const;
   void recordAircraft(const Plane &p);
   void writeDailyStats(const SkywatchData &data);
   bool fileExists(const char *path) const;
@@ -21,8 +38,16 @@ public:
 private:
   bool ready = false;
   String status = "Not initialized";
+  StoredEvent history[EVENT_HISTORY_MAX_ENTRIES];
+  int historyCount = 0;
+  String historyStatus = "Not loaded";
+  uint8_t eventLogFailureCount = 0;
+  unsigned long eventLogRetryAfterMs = 0;
 
   void claimBus() const;
+  bool ensureEventLogPath();
+  File openEventLogForAppend();
+  void scheduleEventLogRetry(const char *reason);
   String safeId(const String &raw) const;
   String timestamp() const;
   bool timeIsValid() const;
@@ -41,4 +66,6 @@ private:
   };
 
   bool loadProfile(const char *path, ProfileState &out) const;
+  bool parseEventLine(char *line, StoredEvent &out) const;
+  void rotateEventLogIfNeeded();
 };
