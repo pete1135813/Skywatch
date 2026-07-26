@@ -6,8 +6,10 @@ void InputCYD::begin() {
   refreshRequested = false;
 
 #if ENABLE_TOUCH_NAV
-  cydClaimTouchSpi(touchSPI);
-  touch.begin(touchSPI);
+  // Touch and SD share the one global VSPI object. CydSpi.h performs an
+  // explicit pin handoff before either device accesses the peripheral.
+  cydClaimTouchSpi(SPI);
+  touch.begin(SPI);
   touch.setRotation(1);
 #endif
 }
@@ -59,7 +61,7 @@ bool InputCYD::hitRefreshButton(int x, int y) {
 
 bool InputCYD::readTouch(int &x, int &y) {
   // Reclaim VSPI for touch pins if SD just used the bus.
-  cydClaimTouchSpi(touchSPI);
+  cydClaimTouchSpi(SPI);
 
   if (!touch.touched()) return false;
   if (millis() - lastTouchMs < 250) return false; // debounce
