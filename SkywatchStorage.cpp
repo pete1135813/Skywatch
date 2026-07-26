@@ -367,21 +367,9 @@ void SkywatchStorage::scheduleEventLogRetry(const char *reason) {
                 reason, retryDelayMs / 1000UL);
 }
 
-bool SkywatchStorage::logEvent(const SkyEvent &event) {
-  if (!ready) {
-    historyStatus = "SD unavailable";
-    Serial.println(F("[SD] Event log skipped: storage not ready"));
-    return false;
-  }
-
-  // Signed subtraction keeps this comparison safe across millis() rollover.
-  if (eventLogRetryAfterMs != 0 &&
-      (int32_t)(millis() - eventLogRetryAfterMs) < 0) {
-    return false;
-  }
-
+File SkywatchStorage::openEventLogForAppend() {
   claimBus();
-  if (!ensureEventLogPath()) return false;
+  if (!ensureEventLogPath()) return File();
   rotateEventLogIfNeeded();
 
   bool fileExisted = SD.exists(SD_EVENT_LOG_PATH);
@@ -396,10 +384,42 @@ bool SkywatchStorage::logEvent(const SkyEvent &event) {
       if (f) Serial.println(F("[SD] Created missing event log file"));
     }
   }
-  if (!f) {
-    scheduleEventLogRetry("event log open failed");
+  if (!f) scheduleEventLogRetry("event log open failed");
+  return f;
+}
+
+bool SkywatchStorage::prepareEventLog() {
+  if (!ready) return false;
+
+  // This is intentionally called after touch initialization. It proves that
+  // VSPI can hand control back to SD before the main loop starts.
+  eventLogRetryAfterMs = 0;
+  File f = openEventLogForAppend();
+  if (!f) return false;
+  f.close();
+
+  eventLogFailureCount = 0;
+  eventLogRetryAfterMs = 0;
+  historyStatus = "Event log ready";
+  Serial.println(F("[SD] Event log write access OK after touch init"));
+  return true;
+}
+
+bool SkywatchStorage::logEvent(const SkyEvent &event) {
+  if (!ready) {
+    historyStatus = "SD unavailable";
+    Serial.println(F("[SD] Event log skipped: storage not ready"));
     return false;
   }
+
+  // Signed subtraction keeps this comparison safe across millis() rollover.
+  if (eventLogRetryAfterMs != 0 &&
+      (int32_t)(millis() - eventLogRetryAfterMs) < 0) {
+    return false;
+  }
+
+  File f = openEventLogForAppend();
+  if (!f) return false;
 
   String type = event.type;
   String callsign = event.callsign;
