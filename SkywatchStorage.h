@@ -25,6 +25,7 @@ public:
   String statusText() const;
   bool ensureFolders();
   bool loadRuntimeConfig(SkywatchData &data);
+  bool prepareEventLog();
   bool logEvent(const SkyEvent &event);
   int loadRecentEvents();
   int getHistoryCount() const;
@@ -45,6 +46,7 @@ private:
 
   void claimBus() const;
   bool ensureEventLogPath();
+  File openEventLogForAppend();
   void scheduleEventLogRetry(const char *reason);
   String safeId(const String &raw) const;
   String timestamp() const;
