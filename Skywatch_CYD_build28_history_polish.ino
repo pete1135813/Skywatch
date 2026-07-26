@@ -136,6 +136,7 @@ void setup() {
   // and firmware uploads. If none exists, boot continues to IP geolocation.
   skywatch.loadSavedHomeCoords();
   input.begin();
+  storage.prepareEventLog();
   display.showSystemCheck(skywatch);
   if (!display.splashLogoOk()) {
     Serial.println(F("[BMP] Hint: use 24-bit uncompressed BMP at /logos/skywatch_logo.bmp"));
