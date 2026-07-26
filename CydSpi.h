@@ -8,11 +8,13 @@
 //   - XPT2046 touch uses separate pins but was also bound to VSPI
 //
 // Touch and SD cannot both "own" VSPI at once. Whoever runs last remaps the
-// pins. Build 26 hit this hard because aircraft memory wrote to SD every
-// minute *after* touch had stolen VSPI.
+// pins. Both devices MUST use the same SPIClass object: two SPIClass instances
+// can each believe VSPI is already initialized while the hardware is actually
+// mapped to the other device.
 //
 // Rule: call cydClaimSdSpi() before any SD access, and cydClaimTouchSpi()
-// before any touch access. CS lines for the idle device are held high.
+// before any touch access. Each handoff ends and restarts the shared bus so
+// the ESP32 pin matrix is physically remapped, not merely updated in software.
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -42,6 +44,7 @@ inline void cydClaimSdSpi() {
   // Keep the TFT off the bus while SD is active (separate pins, shared start-up noise).
   pinMode(TFT_CS_PIN, OUTPUT);
   digitalWrite(TFT_CS_PIN, HIGH);
+  SPI.end();
   SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
   cydSpiOwner = CydSpiOwner::Sd;
 }
@@ -51,6 +54,7 @@ inline void cydClaimTouchSpi(SPIClass &touchSPI) {
   if (cydSpiOwner == CydSpiOwner::Touch) return;
   cydDeselectSd();
   cydDeselectTouch();
+  touchSPI.end();
   touchSPI.begin(TOUCH_CLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
   cydSpiOwner = CydSpiOwner::Touch;
 }
