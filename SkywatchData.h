@@ -37,12 +37,14 @@ struct Plane {
 struct SkyEvent {
   String type;
   String callsign;
+  String icao;
   float distanceNm = 0;
   float cpaNm = 0;
   int etaSec = -1;
   uint8_t threatLevel = 0;
   unsigned long createdMs = 0;
   bool logged = false;
+  bool mqttPublished = false;
 };
 
 class SkywatchData {
@@ -87,6 +89,7 @@ public:
   bool hasRecentAlert(unsigned long maxAgeMs) const;
   String eventLogLine(int index) const;
   void markEventLogged(int index);
+  void markEventMqttPublished(int index);
 
   void computeDistanceBearing(float lat1, float lon1, float lat2, float lon2,
                               float &distanceNm, float &bearingDeg);

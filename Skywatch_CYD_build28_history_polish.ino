@@ -17,6 +17,7 @@
    - LIST page includes LIVE AIRCRAFT and SD-backed HISTORY tabs
    - Event logs use wall-clock timestamps when NTP is available
    - Build 27 local ADS-B, OpenSky fallback, and heap protections preserved
+   - Plain MQTT publishing of alerts and plane snapshots to the workshop broker
 */
 
 #include <WiFi.h>
@@ -28,12 +29,14 @@
 #include "WebDashboard.h"
 #include "InputCYD.h"
 #include "SkywatchStorage.h"
+#include "SkywatchMqtt.h"
 
 SkywatchData skywatch;
 DisplayCYD display;
 WebDashboard web;
 InputCYD input;
 SkywatchStorage storage;
+SkywatchMqtt mqtt;
 WiFiManager wm;
 
 unsigned long lastPlaneUpdate = 0;
@@ -131,7 +134,7 @@ void setup() {
   display.ensureRadarSprite();
 
   skywatch.begin();
-  storage.loadRuntimeConfig(skywatch);
+  storage.loadRuntimeConfig(skywatch, mqtt);
   // A web-saved manual location has highest priority and survives normal reboots
   // and firmware uploads. If none exists, boot continues to IP geolocation.
   skywatch.loadSavedHomeCoords();
@@ -157,6 +160,10 @@ void setup() {
   Serial.println("WiFi connected.");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
+
+  // MQTT uses the same workshop Wi-Fi. Begin after associate so the first
+  // reconnect attempt can run without blocking later UI loops.
+  mqtt.begin();
 
   // Brief settle so DNS/DHCP are ready before NTP + geo HTTP.
   delay(500);
@@ -189,6 +196,8 @@ void setup() {
   logPendingEvents();
   updateAircraftMemory();
   display.drawScreen(input.currentScreen(), skywatch);
+
+  mqtt.update(skywatch);
 
   lastPlaneUpdate = millis();
   lastUiRedraw = millis();
@@ -238,6 +247,8 @@ void loop() {
     lastBatteryUpdate = now;
     skywatch.updateBattery();
   }
+
+  mqtt.update(skywatch);
 
   ScreenMode screen = input.currentScreen();
   display.setListHistoryMode(input.listHistoryActive());

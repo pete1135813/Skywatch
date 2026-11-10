@@ -2,7 +2,7 @@
 
 Portable aircraft radar for the **ESP32 Cheap Yellow Display (CYD)** / ESP32-2432S028R style boards.
 
-Skywatch shows nearby aircraft on a 320×240 landscape TFT, with touch navigation, low-latency local ADS-B, automatic OpenSky network fallback, demo traffic, a captive WiFi setup portal, a simple web dashboard, SD-card event logging, and persistent aircraft “memory” profiles.
+Skywatch shows nearby aircraft on a 320×240 landscape TFT, with touch navigation, low-latency local ADS-B, automatic OpenSky network fallback, demo traffic, a captive WiFi setup portal, a simple web dashboard, SD-card event logging, persistent aircraft “memory” profiles, and plain MQTT publishing of alerts and plane snapshots to the workshop broker.
 
 > **Current development build:** Build 28 — History + Polish  
 > Board: ESP32-2432S028R (CYD) · Display: 320×240 via TFT_eSPI
@@ -27,6 +27,7 @@ Skywatch shows nearby aircraft on a 320×240 landscape TFT, with touch navigatio
 - **SPI bus ownership** (`CydSpi.h`) so SD + touch share VSPI safely
 - **Heap-safe networking:** filtered streaming for local readsb JSON; radar sprite paused during OpenSky TLS and IP geo HTTP
 - **Runtime receiver configuration:** local ADS-B URL can be changed on the SD card without recompiling
+- **MQTT publishing:** `NEW_TARGET` / `APPROACHING` / `THREAT_UP` alerts plus periodic plane snapshots, over plain MQTT on port 1883 (no TLS)
 
 ---
 
@@ -38,16 +39,16 @@ Skywatch shows nearby aircraft on a 320×240 landscape TFT, with touch navigatio
 | Display | 320×240 landscape, **TFT_eSPI** (match your CYD pinout) |
 | Touch | XPT2046 (enable/calibrate in `config.h`) |
 | Storage | microSD — logo, events, `/planes` profiles, `/stats` |
-| Network | WiFi for OpenSky / web dashboard; optional LAN ADS-B |
+| Network | WiFi for OpenSky, web dashboard, and workshop MQTT; optional LAN ADS-B |
 
 ---
 
 ## Flash (Arduino IDE)
 
-1. Libraries: **TFT_eSPI**, **WiFiManager**, **XPT2046_Touchscreen**, **ArduinoJson**
+1. Libraries: **TFT_eSPI**, **WiFiManager**, **XPT2046_Touchscreen**, **ArduinoJson**, **PubSubClient**
 2. Open `Skywatch_CYD_build28_history_polish.ino`
 3. Board: your ESP32 CYD profile · **Partition Scheme: Huge App**
-4. Copy `sd_card_files/` to the microSD and set `LocalADSBURL` in `/config/settings.txt`
+4. Copy `sd_card_files/` to the microSD and set `LocalADSBURL` plus the MQTT keys in `/config/settings.txt`
 5. Upload
 
 ---
@@ -80,7 +81,58 @@ LocalADSBURL=http://192.168.1.64:8080/tar1090/data/aircraft.json
 Replace the address with the LAN IP and port of your readsb/tar1090 host. The URL
 must be reachable from another device on the same network. Local positions older
 than 120 seconds are ignored. A healthy feed is polled every 2 seconds; failed
+
 connections back off for 30 seconds so the display remains responsive.
+
+### MQTT workshop publishing
+
+After Wi-Fi comes up through the existing WiFiManager portal, Skywatch connects
+to the workshop Mosquitto broker with **plain MQTT on port 1883** (no TLS — the
+CYD is already heap-tight around OpenSky HTTPS). Reconnect uses one attempt and
+exponential backoff so the radar UI loop is never blocked in a retry loop.
+
+Edit `/config/settings.txt` on the SD card (compiled defaults match if the keys
+are omitted):
+
+```text
+MqttBroker=192.168.1.151
+MqttPort=1883
+MqttGatewayId=skywatch
+MqttNodeId=radar
+```
+
+| Settings key | Default | Purpose |
+| --- | --- | --- |
+| `MqttBroker` | `192.168.1.151` | Workshop Mosquitto host |
+| `MqttPort` | `1883` | Plain MQTT port (not TLS) |
+| `MqttGatewayId` | `skywatch` | Included in JSON payloads |
+| `MqttNodeId` | `radar` | Included in payloads and topic paths |
+
+#### Topic layout
+
+```text
+workshop/skywatch/<MqttNodeId>/alerts
+workshop/skywatch/<MqttNodeId>/planes
+```
+
+With the default node id that is:
+
+```text
+workshop/skywatch/radar/alerts
+workshop/skywatch/radar/planes
+```
+
+Alert events (`NEW_TARGET`, `APPROACHING`, `THREAT_UP`) are published as JSON
+on the alerts topic: `gateway_id`, `node_id`, `type`, `callsign`, `icao`,
+`distanceNm`, `cpaNm`, `etaSec`, and `threatLevel`.
+
+Plane snapshots are published about every 5 seconds on the planes topic, with
+the same gateway/node fields plus `source`, `count`, and a `planes` array of
+`callsign`, `icao`, `distanceNm`, `bearingDeg`, `headingDeg`, `altitudeFt`,
+`speedKt`, `cpaNm`, and `threatLevel`.
+
+These topics sit beside Argus’s SensorGateway path (`workshop/gateway/...`) so
+Spark can subscribe without changing Skywatch’s radar loop.
 
 ---
 
@@ -89,7 +141,7 @@ connections back off for 30 seconds so the display remains responsive.
 Copy `sd_card_files/` to the **root** of a FAT microSD:
 
 ```
-/config/settings.txt         ← local ADS-B URL override
+/config/settings.txt         ← local ADS-B URL and MQTT broker/node overrides
 /logos/skywatch_logo.bmp    ← 24-bit uncompressed BMP, 320×240 recommended
 /events/
 /tracks/
@@ -113,6 +165,7 @@ If the logo is missing or invalid, a vector splash is used instead.
 ├── InputCYD.*               # touch + RFRSH hit testing
 ├── WebDashboard.*
 ├── SkywatchStorage.*        # SD init, events, aircraft memory
+├── SkywatchMqtt.*           # plain MQTT alerts and plane snapshots
 ├── skywatch_logo.bmp
 └── sd_card_files/
 ```

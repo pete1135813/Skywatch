@@ -1,5 +1,6 @@
 #include "SkywatchStorage.h"
 #include "SkywatchData.h"
+#include "SkywatchMqtt.h"
 #include "CydSpi.h"
 #include <time.h>
 #include <string.h>
@@ -270,7 +271,7 @@ bool SkywatchStorage::ensureFolders() {
   return allReady;
 }
 
-bool SkywatchStorage::loadRuntimeConfig(SkywatchData &data) {
+bool SkywatchStorage::loadRuntimeConfig(SkywatchData &data, SkywatchMqtt &mqtt) {
   if (!ready) {
     Serial.println(F("[Config] SD unavailable; using compiled defaults"));
     return false;
@@ -299,6 +300,18 @@ bool SkywatchStorage::loadRuntimeConfig(SkywatchData &data) {
 
     if (key.equalsIgnoreCase("LocalADSBURL") && value.length()) {
       data.setLocalAdsbUrl(value);
+      applied = true;
+    } else if (key.equalsIgnoreCase("MqttBroker") && value.length()) {
+      mqtt.setBroker(value);
+      applied = true;
+    } else if (key.equalsIgnoreCase("MqttPort") && value.length()) {
+      mqtt.setPort(value.toInt());
+      applied = true;
+    } else if (key.equalsIgnoreCase("MqttGatewayId") && value.length()) {
+      mqtt.setGatewayId(value);
+      applied = true;
+    } else if (key.equalsIgnoreCase("MqttNodeId") && value.length()) {
+      mqtt.setNodeId(value);
       applied = true;
     }
   }

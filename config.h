@@ -152,6 +152,19 @@ static const unsigned long AIRCRAFT_SEEN_GAP_SEC = 300; // 5 minutes
 static const unsigned long ALERT_POPUP_MS = 5000;
 static const unsigned long OBSERVER_IDLE_MS = 300000;
 
+// ---------------------- MQTT ----------------------
+// Plain MQTT only (port 1883). Do not use TLS — OpenSky HTTPS already
+// stretches CYD heap, and the workshop broker is on the LAN.
+static const char MQTT_BROKER_DEFAULT[] = "192.168.1.151";
+static const uint16_t MQTT_PORT_DEFAULT = 1883;
+static const char MQTT_GATEWAY_ID_DEFAULT[] = "skywatch";
+static const char MQTT_NODE_ID_DEFAULT[] = "radar";
+static const unsigned long MQTT_PLANE_SNAPSHOT_INTERVAL_MS = 5000;
+static const unsigned long MQTT_RECONNECT_MIN_MS = 2000;
+static const unsigned long MQTT_RECONNECT_MAX_MS = 30000;
+static const uint16_t MQTT_PAYLOAD_BUFFER = 3072;
+static const int MQTT_ALERTS_PER_UPDATE = 3;
+
 // ---------------------- WIFI ----------------------
 static const char WIFI_PORTAL_SSID[] = "Skywatch";
 

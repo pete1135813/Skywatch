@@ -6,6 +6,7 @@
 struct Plane;
 struct SkyEvent;
 class SkywatchData;
+class SkywatchMqtt;
 
 struct StoredEvent {
   char timestamp[24] = {0};
@@ -24,7 +25,7 @@ public:
   bool isReady() const;
   String statusText() const;
   bool ensureFolders();
-  bool loadRuntimeConfig(SkywatchData &data);
+  bool loadRuntimeConfig(SkywatchData &data, SkywatchMqtt &mqtt);
   bool prepareEventLog();
   bool logEvent(const SkyEvent &event);
   int loadRecentEvents();

@@ -133,6 +133,9 @@ String SkywatchData::eventLogLine(int index) const {
 void SkywatchData::markEventLogged(int index) {
   if (index >= 0 && index < eventCount) events[index].logged = true;
 }
+void SkywatchData::markEventMqttPublished(int index) {
+  if (index >= 0 && index < eventCount) events[index].mqttPublished = true;
+}
 
 String SkywatchData::getOpenSkyModeLabel() const {
 #if OPENSKY_CALL_MODE == OPENSKY_MODE_MANUAL_ONLY
@@ -177,12 +180,14 @@ void SkywatchData::addEvent(const String &type, const Plane &p) {
   SkyEvent &e = events[0];
   e.type = type;
   e.callsign = p.callsign.length() ? p.callsign : p.icao;
+  e.icao = p.icao;
   e.distanceNm = p.distanceNm;
   e.cpaNm = p.cpaDistanceNm;
   e.etaSec = p.cpaEtaSec;
   e.threatLevel = p.threatLevel;
   e.createdMs = millis();
   e.logged = false;
+  e.mqttPublished = false;
   if (eventCount < 20) eventCount++;
   Serial.println("[Event] " + eventLogLine(0));
 }
